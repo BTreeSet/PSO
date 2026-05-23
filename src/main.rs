@@ -96,10 +96,10 @@ struct FetchLogicalsArgs {
     api_base_url: String,
     #[arg(long, default_value = "proton-logicals.json")]
     output: PathBuf,
-    #[arg(long, default_value = "proton-logicals.cache.json")]
-    cache: PathBuf,
+    #[arg(long, env = "PSO_STATE_DIR", default_value = "pso-state")]
+    state_dir: PathBuf,
     #[arg(long)]
-    no_cache_fallback: bool,
+    no_state_fallback: bool,
 }
 
 #[derive(Debug, Args)]
@@ -122,12 +122,8 @@ struct LoginArgs {
     fork_payload: Option<String>,
     #[arg(long)]
     output: Option<PathBuf>,
-    #[arg(
-        long,
-        env = "PSO_VPN_SESSION_CACHE",
-        default_value = "vpn-session.json"
-    )]
-    session_cache_file: PathBuf,
+    #[arg(long, env = "PSO_STATE_DIR", default_value = "pso-state")]
+    state_dir: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -138,16 +134,12 @@ struct RefreshVpnTokenArgs {
     api_base_url: String,
     #[arg(long)]
     output: Option<PathBuf>,
-    #[arg(
-        long,
-        env = "PSO_VPN_SESSION_CACHE",
-        default_value = "vpn-session.json"
-    )]
-    session_cache_file: PathBuf,
+    #[arg(long, env = "PSO_STATE_DIR", default_value = "pso-state")]
+    state_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CachedVpnSession {
+struct VpnSessionState {
     uid: String,
     refresh_token: String,
 }
@@ -262,22 +254,22 @@ async fn control_plane(args: ControlPlaneArgs) -> Result<()> {
 
 async fn fetch_logicals(args: FetchLogicalsArgs) -> Result<()> {
     let api = ProtonApiClient::new(args.api_base_url)?;
+    let state_logicals = args.state_dir.join("logicals.json");
     match api.get_logicals(&args.access_token).await {
         Ok(logicals) => {
             let value = serde_json::json!({ "LogicalServers": logicals });
             let text = serde_json::to_string_pretty(&value)?;
             fs::write(&args.output, &text)
                 .with_context(|| format!("failed to write {}", args.output.display()))?;
-            fs::write(&args.cache, text)
-                .with_context(|| format!("failed to write {}", args.cache.display()))?;
+            write_state_file(&state_logicals, &text)?;
         }
-        Err(error) if !args.no_cache_fallback && args.cache.exists() => {
+        Err(error) if !args.no_state_fallback && state_logicals.exists() => {
             eprintln!(
-                "warning: /vpn/logicals fetch failed, using cached topology from {}: {error:#}",
-                args.cache.display()
+                "warning: /vpn/logicals fetch failed, using state topology from {}: {error:#}",
+                state_logicals.display()
             );
-            let cached: ProtonLogicalResponse = read_json(&args.cache)?;
-            let value = serde_json::json!({ "LogicalServers": cached.into_servers() });
+            let state: ProtonLogicalResponse = read_json(&state_logicals)?;
+            let value = serde_json::json!({ "LogicalServers": state.into_servers() });
             fs::write(&args.output, serde_json::to_string_pretty(&value)?)
                 .with_context(|| format!("failed to write {}", args.output.display()))?;
         }
@@ -341,8 +333,12 @@ async fn login(args: LoginArgs) -> Result<()> {
         .uid
         .clone()
         .or(primary.uid.clone())
-        .context("Proton login response did not include UID for refresh cache")?;
-    store_cached_vpn_session(&uid, &vpn.refresh_token, &args.session_cache_file)?;
+        .context("Proton login response did not include UID for session state")?;
+    store_vpn_session_state(
+        &uid,
+        &vpn.refresh_token,
+        &args.state_dir.join("vpn-session.json"),
+    )?;
 
     if let Some(output) = args.output {
         fs::write(&output, serde_json::to_string_pretty(&vpn)?)
@@ -355,13 +351,14 @@ async fn login(args: LoginArgs) -> Result<()> {
 }
 
 async fn refresh_vpn_token(args: RefreshVpnTokenArgs) -> Result<()> {
-    let cached = load_cached_vpn_session(&args.session_cache_file)?;
+    let session_state = args.state_dir.join("vpn-session.json");
+    let state = load_vpn_session_state(&session_state)?;
     let api = ProtonApiClient::new(args.api_base_url)?;
     let refreshed = api
-        .refresh_session(&cached.uid, &cached.refresh_token)
+        .refresh_session(&state.uid, &state.refresh_token)
         .await?;
-    let uid = refreshed.uid.as_deref().unwrap_or(&cached.uid);
-    store_cached_vpn_session(uid, &refreshed.refresh_token, &args.session_cache_file)?;
+    let uid = refreshed.uid.as_deref().unwrap_or(&state.uid);
+    store_vpn_session_state(uid, &refreshed.refresh_token, &session_state)?;
 
     if let Some(output) = args.output {
         fs::write(&output, serde_json::to_string_pretty(&refreshed)?)
@@ -373,26 +370,30 @@ async fn refresh_vpn_token(args: RefreshVpnTokenArgs) -> Result<()> {
     Ok(())
 }
 
-fn store_cached_vpn_session(uid: &str, refresh_token: &str, cache_file: &PathBuf) -> Result<()> {
-    let cached = CachedVpnSession {
+fn store_vpn_session_state(uid: &str, refresh_token: &str, state_file: &PathBuf) -> Result<()> {
+    let state = VpnSessionState {
         uid: uid.to_string(),
         refresh_token: refresh_token.to_string(),
     };
-    let text = serde_json::to_string(&cached)?;
-    if let Some(parent) = cache_file
+    let text = serde_json::to_string(&state)?;
+    write_state_file(state_file, &text)
+}
+
+fn load_vpn_session_state(state_file: &PathBuf) -> Result<VpnSessionState> {
+    let state = fs::read_to_string(state_file)
+        .with_context(|| format!("failed to read {}", state_file.display()))?;
+    serde_json::from_str(&state).context("failed to decode VPN session state")
+}
+
+fn write_state_file(path: &PathBuf, text: &str) -> Result<()> {
+    if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::write(cache_file, text).with_context(|| format!("failed to write {}", cache_file.display()))
-}
-
-fn load_cached_vpn_session(cache_file: &PathBuf) -> Result<CachedVpnSession> {
-    let cached = fs::read_to_string(cache_file)
-        .with_context(|| format!("failed to read {}", cache_file.display()))?;
-    serde_json::from_str(&cached).context("failed to decode cached VPN session")
+    fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {

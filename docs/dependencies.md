@@ -45,7 +45,7 @@ This is an accepted temporary cost of using current `bcrypt`/`tempfile` while ke
 - `Cargo.lock` is committed and Docker builds use `cargo build --release --locked`.
 - `reqwest` is built with `default-features = false` and only the features PSO uses: `json`, `query`, `rustls`.
 - Native OpenSSL is avoided in the PSO binary; the Alpine runtime installs only `bash`, `tzdata`, `ca-certificates`, and `nftables` plus bundled `sing-box`.
-- Desktop keyring integration was removed. Headless deployments use an explicit session cache file, typically a mounted Docker volume or secret-backed path.
+- Desktop keyring integration was removed. Headless deployments use explicit files under the PSO state directory, typically backed by a mounted Docker volume.
 - `keyring` was removed to avoid desktop secret-service assumptions and to reduce platform-specific transitive dependencies.
 - `reqwest 0.13` with the `rustls` feature currently pulls `aws-lc-rs`/`aws-lc-sys`, which adds a native cryptography build dependency. This is the upstream default provider path for current reqwest/rustls. Monitor this dependency in CI and review if a pure-Rust provider option becomes viable without runtime provider setup.
 - Docker images are built multi-arch in CI and publish to GHCR only from non-PR runs.
