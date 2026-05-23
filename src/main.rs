@@ -122,10 +122,12 @@ struct LoginArgs {
     fork_payload: Option<String>,
     #[arg(long)]
     output: Option<PathBuf>,
-    #[arg(long, env = "PSO_VPN_SESSION_CACHE")]
-    session_cache_file: Option<PathBuf>,
-    #[arg(long)]
-    no_keyring: bool,
+    #[arg(
+        long,
+        env = "PSO_VPN_SESSION_CACHE",
+        default_value = "vpn-session.json"
+    )]
+    session_cache_file: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -136,8 +138,12 @@ struct RefreshVpnTokenArgs {
     api_base_url: String,
     #[arg(long)]
     output: Option<PathBuf>,
-    #[arg(long, env = "PSO_VPN_SESSION_CACHE")]
-    session_cache_file: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "PSO_VPN_SESSION_CACHE",
+        default_value = "vpn-session.json"
+    )]
+    session_cache_file: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -331,19 +337,12 @@ async fn login(args: LoginArgs) -> Result<()> {
         .fork_vpn_session(&primary.access_token, args.fork_payload)
         .await?;
 
-    if !args.no_keyring || args.session_cache_file.is_some() {
-        let uid = vpn
-            .uid
-            .clone()
-            .or(primary.uid.clone())
-            .context("Proton login response did not include UID for refresh cache")?;
-        store_cached_vpn_session(
-            &args.username,
-            &uid,
-            &vpn.refresh_token,
-            args.session_cache_file.as_ref(),
-        )?;
-    }
+    let uid = vpn
+        .uid
+        .clone()
+        .or(primary.uid.clone())
+        .context("Proton login response did not include UID for refresh cache")?;
+    store_cached_vpn_session(&uid, &vpn.refresh_token, &args.session_cache_file)?;
 
     if let Some(output) = args.output {
         fs::write(&output, serde_json::to_string_pretty(&vpn)?)
@@ -356,18 +355,13 @@ async fn login(args: LoginArgs) -> Result<()> {
 }
 
 async fn refresh_vpn_token(args: RefreshVpnTokenArgs) -> Result<()> {
-    let cached = load_cached_vpn_session(&args.username, args.session_cache_file.as_ref())?;
+    let cached = load_cached_vpn_session(&args.session_cache_file)?;
     let api = ProtonApiClient::new(args.api_base_url)?;
     let refreshed = api
         .refresh_session(&cached.uid, &cached.refresh_token)
         .await?;
     let uid = refreshed.uid.as_deref().unwrap_or(&cached.uid);
-    store_cached_vpn_session(
-        &args.username,
-        uid,
-        &refreshed.refresh_token,
-        args.session_cache_file.as_ref(),
-    )?;
+    store_cached_vpn_session(uid, &refreshed.refresh_token, &args.session_cache_file)?;
 
     if let Some(output) = args.output {
         fs::write(&output, serde_json::to_string_pretty(&refreshed)?)
@@ -379,40 +373,25 @@ async fn refresh_vpn_token(args: RefreshVpnTokenArgs) -> Result<()> {
     Ok(())
 }
 
-fn store_cached_vpn_session(
-    username: &str,
-    uid: &str,
-    refresh_token: &str,
-    cache_file: Option<&PathBuf>,
-) -> Result<()> {
+fn store_cached_vpn_session(uid: &str, refresh_token: &str, cache_file: &PathBuf) -> Result<()> {
     let cached = CachedVpnSession {
         uid: uid.to_string(),
         refresh_token: refresh_token.to_string(),
     };
     let text = serde_json::to_string(&cached)?;
-
-    if let Some(path) = cache_file {
-        fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
-    } else {
-        let entry = keyring::Entry::new("pso-vpn-session", username)?;
-        entry
-            .set_password(&text)
-            .context("failed to store VPN refresh token in OS keyring")
+    if let Some(parent) = cache_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    fs::write(cache_file, text).with_context(|| format!("failed to write {}", cache_file.display()))
 }
 
-fn load_cached_vpn_session(
-    username: &str,
-    cache_file: Option<&PathBuf>,
-) -> Result<CachedVpnSession> {
-    let cached = if let Some(path) = cache_file {
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?
-    } else {
-        let entry = keyring::Entry::new("pso-vpn-session", username)?;
-        entry
-            .get_password()
-            .context("failed to load VPN refresh token from OS keyring")?
-    };
+fn load_cached_vpn_session(cache_file: &PathBuf) -> Result<CachedVpnSession> {
+    let cached = fs::read_to_string(cache_file)
+        .with_context(|| format!("failed to read {}", cache_file.display()))?;
     serde_json::from_str(&cached).context("failed to decode cached VPN session")
 }
 
