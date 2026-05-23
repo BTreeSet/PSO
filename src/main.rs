@@ -3,9 +3,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::Parser;
 use pso::api::{AuthTokens, ProtonApiClient};
 use pso::auth::{calculate_srp_proof, resolve_two_factor_code};
+use pso::cli::{
+    AuthCommand, Cli, Command, ControlPlaneArgs, FetchLogicalsArgs, HealthCommand, LoginArgs,
+    ProbeArgs, RefreshVpnTokenArgs, RenderArgs, RunArgs, TopologyCommand,
+};
+use pso::config::{
+    AppConfig, AuthConfig, ControlPlaneDefaults, DEFAULT_API_BASE_URL, DEFAULT_STATE_DIR,
+    RenderConfig, RuntimeContext, SessionEntry, TopologyConfig, read_json, read_optional_config,
+};
 use pso::control_plane::{ControlPlane, ControlPlaneConfig};
 use pso::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use pso::health::{HealthMonitor, HealthStatus};
@@ -13,255 +21,14 @@ use pso::model::{PhysicalServer, ProtonLogicalResponse};
 use pso::process::{find_process_pid, find_process_pid_by_exe};
 use pso::provisioning::LocalKeyProvisioner;
 use pso::session::{SessionStore, UserSession};
+use pso::state::{
+    load_vpn_session_state, store_vpn_session_state, topology_state_file, vpn_session_state_file,
+    write_state_file,
+};
 use pso::template::hydrate_template;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::sleep;
 use tracing::info;
-
-#[derive(Debug, Parser)]
-#[command(name = "pso", about = "Proton-Singbox Orchestrator")]
-struct Cli {
-    #[arg(long, default_value = "pso.config.json")]
-    config: PathBuf,
-    #[arg(long, env = "PSO_STATE_DIR")]
-    state_dir: Option<PathBuf>,
-    #[arg(long, env = "PSO_API_BASE_URL")]
-    api_base_url: Option<String>,
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    Run(RunArgs),
-    Render(RenderArgs),
-    Health(HealthArgs),
-    ControlPlane(ControlPlaneArgs),
-    Auth(AuthArgs),
-    Topology(TopologyArgs),
-}
-
-#[derive(Debug, Args)]
-struct AuthArgs {
-    #[command(subcommand)]
-    command: AuthCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum AuthCommand {
-    Login(LoginArgs),
-    Refresh(RefreshVpnTokenArgs),
-}
-
-#[derive(Debug, Args)]
-struct TopologyArgs {
-    #[command(subcommand)]
-    command: TopologyCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum TopologyCommand {
-    Fetch(FetchLogicalsArgs),
-}
-
-#[derive(Debug, Args)]
-struct HealthArgs {
-    #[command(subcommand)]
-    command: HealthCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum HealthCommand {
-    Baseline,
-    Probe(ProbeArgs),
-}
-
-#[derive(Debug, Args)]
-struct RenderArgs {
-    #[arg(long)]
-    template: Option<PathBuf>,
-    #[arg(long)]
-    topology: Option<PathBuf>,
-    #[arg(long)]
-    output: Option<PathBuf>,
-    #[arg(long)]
-    active_config: Option<PathBuf>,
-    #[arg(long)]
-    singbox_pid: Option<i32>,
-    #[arg(long)]
-    singbox_bin: Option<PathBuf>,
-    #[arg(long = "session", value_parser = parse_session)]
-    sessions: Vec<(String, String)>,
-    #[arg(long)]
-    dry_run: bool,
-}
-
-#[derive(Debug, Args)]
-struct RunArgs {
-    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
-    access_token: Option<String>,
-    #[arg(long)]
-    raw_ip: Option<String>,
-    #[arg(long)]
-    proxy_url: Option<String>,
-    #[arg(long)]
-    once: bool,
-    #[arg(long)]
-    interval_secs: Option<u64>,
-}
-
-#[derive(Debug, Args)]
-struct ProbeArgs {
-    #[arg(long)]
-    raw_ip: Option<String>,
-    #[arg(long)]
-    proxy_url: Option<String>,
-    #[arg(long, default_value = "60")]
-    interval_secs: u64,
-    #[arg(long)]
-    loop_forever: bool,
-    #[arg(long, default_value = "manual-probe")]
-    outbound_tag: String,
-}
-
-#[derive(Debug, Args)]
-struct ControlPlaneArgs {
-    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
-    access_token: String,
-    #[arg(long)]
-    active_config: Option<PathBuf>,
-    #[arg(long)]
-    singbox_pid: Option<i32>,
-    #[arg(long)]
-    singbox_bin: Option<PathBuf>,
-    #[arg(long)]
-    outbound_tag: Option<String>,
-    #[arg(long)]
-    endpoint: Option<String>,
-    #[arg(long)]
-    peer_public_key: Option<String>,
-}
-
-#[derive(Debug, Args)]
-struct FetchLogicalsArgs {
-    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
-    access_token: String,
-    #[arg(long, default_value = "proton-logicals.json")]
-    output: PathBuf,
-    #[arg(long)]
-    fallback_topology: Option<PathBuf>,
-    #[arg(long)]
-    require_live: bool,
-}
-
-#[derive(Debug, Args)]
-struct LoginArgs {
-    #[arg(long)]
-    username: Option<String>,
-    #[arg(long, env = "PSO_PROTON_PASSWORD")]
-    password: Option<String>,
-    #[arg(long, env = "PSO_PROTON_PASSWORD_FILE")]
-    password_file: Option<PathBuf>,
-    #[arg(long)]
-    no_prompt: bool,
-    #[arg(
-        long,
-        env = "PSO_PROTON_TOTP",
-        help = "Six-digit 2FA code, base32 TOTP secret, or otpauth:// URI"
-    )]
-    totp: Option<String>,
-    #[arg(long)]
-    human_verification_token: Option<String>,
-    #[arg(long)]
-    output: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-struct RefreshVpnTokenArgs {
-    #[arg(long)]
-    username: Option<String>,
-    #[arg(long)]
-    output: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug)]
-struct RuntimeContext {
-    api_base_url: String,
-    state_dir: PathBuf,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct AppConfig {
-    api_base_url: Option<String>,
-    state_dir: Option<PathBuf>,
-    auth: AuthConfig,
-    topology: TopologyConfig,
-    render: RenderConfig,
-    control_plane: ControlPlaneDefaults,
-    run: RunConfig,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct AuthConfig {
-    username: Option<String>,
-    password: Option<String>,
-    password_file: Option<PathBuf>,
-    totp: Option<String>,
-    no_prompt: Option<bool>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct TopologyConfig {
-    fallback_topology: Option<PathBuf>,
-    require_live: Option<bool>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct RenderConfig {
-    template: Option<PathBuf>,
-    topology: Option<PathBuf>,
-    output: Option<PathBuf>,
-    active_config: Option<PathBuf>,
-    singbox_pid: Option<i32>,
-    singbox_bin: Option<PathBuf>,
-    sessions: Vec<SessionEntry>,
-    dry_run: Option<bool>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct SessionEntry {
-    username: String,
-    tier: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct ControlPlaneDefaults {
-    active_config: Option<PathBuf>,
-    singbox_pid: Option<i32>,
-    singbox_bin: Option<PathBuf>,
-    outbound_tag: Option<String>,
-    endpoint: Option<String>,
-    peer_public_key: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct RunConfig {
-    proxy_url: Option<String>,
-    interval_secs: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct VpnSessionState {
-    uid: String,
-    refresh_token: String,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -275,11 +42,11 @@ async fn main() -> Result<()> {
         api_base_url: cli
             .api_base_url
             .or(config.api_base_url.clone())
-            .unwrap_or_else(|| "https://api.protonvpn.ch".to_string()),
+            .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string()),
         state_dir: cli
             .state_dir
             .or(config.state_dir.clone())
-            .unwrap_or_else(|| PathBuf::from("pso-state")),
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR)),
     };
 
     match cli.command {
@@ -527,7 +294,7 @@ async fn fetch_logicals(
     args: FetchLogicalsArgs,
 ) -> Result<()> {
     let api = ProtonApiClient::new(&context.api_base_url)?;
-    let state_logicals = context.state_dir.join("logicals.json");
+    let state_logicals = topology_state_file(context);
     let fallback_topology = args
         .fallback_topology
         .as_ref()
@@ -696,15 +463,6 @@ async fn refresh_vpn_token(
     Ok(())
 }
 
-fn store_vpn_session_state(uid: &str, refresh_token: &str, state_file: &PathBuf) -> Result<()> {
-    let state = VpnSessionState {
-        uid: uid.to_string(),
-        refresh_token: refresh_token.to_string(),
-    };
-    let text = serde_json::to_string(&state)?;
-    write_state_file(state_file, &text)
-}
-
 fn run_username(config: &AppConfig) -> Option<String> {
     config.auth.username.clone().or_else(|| {
         config
@@ -713,48 +471,6 @@ fn run_username(config: &AppConfig) -> Option<String> {
             .first()
             .map(|session| session.username.clone())
     })
-}
-
-fn vpn_session_state_file(context: &RuntimeContext, username: &str) -> PathBuf {
-    context
-        .state_dir
-        .join("users")
-        .join(sanitize_state_component(username))
-        .join("vpn-session.json")
-}
-
-fn sanitize_state_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => character,
-            _ => '_',
-        })
-        .collect()
-}
-
-fn load_vpn_session_state(state_file: &PathBuf) -> Result<VpnSessionState> {
-    let state = fs::read_to_string(state_file)
-        .with_context(|| format!("failed to read {}", state_file.display()))?;
-    serde_json::from_str(&state).context("failed to decode VPN session state")
-}
-
-fn read_optional_config(path: &PathBuf) -> Result<AppConfig> {
-    if !path.exists() {
-        return Ok(AppConfig::default());
-    }
-    read_json(path)
-}
-
-fn write_state_file(path: &PathBuf, text: &str) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn resolve_sessions(
@@ -791,17 +507,4 @@ fn resolve_singbox_pid(singbox_bin: &Path) -> Result<i32> {
             )
         }),
     }
-}
-
-fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
-}
-
-fn parse_session(value: &str) -> Result<(String, String), String> {
-    let (username, tier) = value
-        .split_once(':')
-        .ok_or_else(|| "session must use username:tier format".to_string())?;
-    Ok((username.to_string(), tier.to_string()))
 }

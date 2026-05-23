@@ -3,7 +3,7 @@
     "state_dir": "/var/lib/pso",
     "auth": {
         "username": "alice@example.com",
-        "password_file": "/run/secrets/proton_password",
+        "password": "replace-with-protonvpn-password",
         "totp": "BASE32TOTPSECRET",
         "no_prompt": true
     },

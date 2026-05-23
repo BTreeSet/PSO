@@ -1,0 +1,177 @@
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::{Args, Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(name = "pso", about = "Proton-Singbox Orchestrator")]
+pub struct Cli {
+    #[arg(long, default_value = "pso.config.json")]
+    pub config: PathBuf,
+    #[arg(long, env = "PSO_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
+    #[arg(long, env = "PSO_API_BASE_URL")]
+    pub api_base_url: Option<String>,
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    Run(RunArgs),
+    Render(RenderArgs),
+    Health(HealthArgs),
+    ControlPlane(ControlPlaneArgs),
+    Auth(AuthArgs),
+    Topology(TopologyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub command: AuthCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    Login(LoginArgs),
+    Refresh(RefreshVpnTokenArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TopologyArgs {
+    #[command(subcommand)]
+    pub command: TopologyCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TopologyCommand {
+    Fetch(FetchLogicalsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HealthArgs {
+    #[command(subcommand)]
+    pub command: HealthCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HealthCommand {
+    Baseline,
+    Probe(ProbeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RenderArgs {
+    #[arg(long)]
+    pub template: Option<PathBuf>,
+    #[arg(long)]
+    pub topology: Option<PathBuf>,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[arg(long)]
+    pub active_config: Option<PathBuf>,
+    #[arg(long)]
+    pub singbox_pid: Option<i32>,
+    #[arg(long)]
+    pub singbox_bin: Option<PathBuf>,
+    #[arg(long = "session", value_parser = parse_session)]
+    pub sessions: Vec<(String, String)>,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
+    pub access_token: Option<String>,
+    #[arg(long)]
+    pub raw_ip: Option<String>,
+    #[arg(long)]
+    pub proxy_url: Option<String>,
+    #[arg(long)]
+    pub once: bool,
+    #[arg(long)]
+    pub interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProbeArgs {
+    #[arg(long)]
+    pub raw_ip: Option<String>,
+    #[arg(long)]
+    pub proxy_url: Option<String>,
+    #[arg(long, default_value = "60")]
+    pub interval_secs: u64,
+    #[arg(long)]
+    pub loop_forever: bool,
+    #[arg(long, default_value = "manual-probe")]
+    pub outbound_tag: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ControlPlaneArgs {
+    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
+    pub access_token: String,
+    #[arg(long)]
+    pub active_config: Option<PathBuf>,
+    #[arg(long)]
+    pub singbox_pid: Option<i32>,
+    #[arg(long)]
+    pub singbox_bin: Option<PathBuf>,
+    #[arg(long)]
+    pub outbound_tag: Option<String>,
+    #[arg(long)]
+    pub endpoint: Option<String>,
+    #[arg(long)]
+    pub peer_public_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FetchLogicalsArgs {
+    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
+    pub access_token: String,
+    #[arg(long, default_value = "proton-logicals.json")]
+    pub output: PathBuf,
+    #[arg(long)]
+    pub fallback_topology: Option<PathBuf>,
+    #[arg(long)]
+    pub require_live: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LoginArgs {
+    #[arg(long)]
+    pub username: Option<String>,
+    #[arg(long, env = "PSO_PROTON_PASSWORD")]
+    pub password: Option<String>,
+    #[arg(long, env = "PSO_PROTON_PASSWORD_FILE")]
+    pub password_file: Option<PathBuf>,
+    #[arg(long)]
+    pub no_prompt: bool,
+    #[arg(
+        long,
+        env = "PSO_PROTON_TOTP",
+        help = "Six-digit 2FA code, base32 TOTP secret, or otpauth:// URI"
+    )]
+    pub totp: Option<String>,
+    #[arg(long)]
+    pub human_verification_token: Option<String>,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct RefreshVpnTokenArgs {
+    #[arg(long)]
+    pub username: Option<String>,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+fn parse_session(value: &str) -> Result<(String, String), String> {
+    let (username, tier) = value
+        .split_once(':')
+        .ok_or_else(|| "session must use username:tier format".to_string())?;
+    Ok((username.to_string(), tier.to_string()))
+}

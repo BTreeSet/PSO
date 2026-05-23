@@ -59,9 +59,9 @@ Run the Proton SRP login flow and fork the primary account session into a VPN-sc
 
 ```bash
 PSO_STATE_DIR=/var/lib/pso \
-PSO_PROTON_PASSWORD_FILE=/run/secrets/proton_password \
 cargo run -- auth login \
   --username alice@example.com \
+  --password 'replace-with-protonvpn-password' \
   --totp 123456 \
   --no-prompt
 ```
@@ -70,6 +70,7 @@ Credential input options:
 
 - `--password` or `PSO_PROTON_PASSWORD`
 - `--password-file` or `PSO_PROTON_PASSWORD_FILE`
+- `auth.password` or `auth.password_file` in `pso.config.json` for config-first deployments
 - `--totp` or `PSO_PROTON_TOTP` when the account requires 2FA. The value may be a six-digit one-time code, a base32 TOTP secret, or an `otpauth://` URI.
 - `--no-prompt` for headless deployments
 
@@ -187,9 +188,9 @@ The intended Docker setup mounts:
 - `pso.config.json` at `/etc/pso/pso.config.json`
 - `config.template.json` at the path referenced by config
 - a durable state volume at `/var/lib/pso`
-- password material as a Docker secret or equivalent mounted file
+- ProtonVPN username, password, and TOTP defaults in `pso.config.json`
 
-See `docker-compose.example.yml` for the minimal layout. VPN session state is written per account under `state/users/<username>/vpn-session.json`, with unsafe path characters normalized.
+See `docker-compose.example.yml` for the minimal layout. VPN session state is written per account under `state/users/<sha256(username)>/vpn-session.json`; usernames are hashed before they become state path components.
 
 Docker is not required for local Rust development.
 

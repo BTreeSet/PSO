@@ -1,5 +1,7 @@
 pub mod api;
 pub mod auth;
+pub mod cli;
+pub mod config;
 pub mod control_plane;
 pub mod crypto;
 pub mod deploy;
@@ -11,6 +13,7 @@ pub mod provisioning;
 pub mod scheduler;
 pub mod session;
 pub mod singbox_adapter;
+pub mod state;
 pub mod template;
 
 pub use api::{CertificateRequest, CertificateResponse, ProtonApiClient};
