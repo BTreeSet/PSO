@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::model::{LogicalServer, ProtonLogicalResponse};
+
 #[derive(Clone, Debug)]
 pub struct ProtonApiClient {
     base_url: String,
@@ -46,6 +48,26 @@ impl ProtonApiClient {
             .json::<CertificateResponse>()
             .await
             .context("failed to decode Proton certificate response")
+    }
+
+    pub async fn get_logicals(&self, access_token: &str) -> Result<Vec<LogicalServer>> {
+        let url = format!("{}/vpn/logicals", self.base_url);
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(access_token)
+            .query(&[("WithState", "true"), ("Protocols", "wireguard")])
+            .send()
+            .await
+            .context("failed to send Proton logicals request")?
+            .error_for_status()
+            .context("Proton logicals request failed")?;
+
+        Ok(response
+            .json::<ProtonLogicalResponse>()
+            .await
+            .context("failed to decode Proton logicals response")?
+            .into_servers())
     }
 }
 

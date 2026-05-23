@@ -98,7 +98,7 @@ pub fn select_target(
         }
 
         for physical in &logical.servers {
-            if physical.status == 0 {
+            if physical.status == 0 || physical.services_down.unwrap_or(0) > 0 {
                 continue;
             }
 
@@ -244,8 +244,11 @@ mod tests {
             LogicalServer {
                 id: "1".into(),
                 name: "NL#1".into(),
+                entry_country: Some("NL".into()),
                 exit_country: "NL".into(),
+                domain: None,
                 city: Some("Amsterdam".into()),
+                region: None,
                 tier: 2,
                 features: FeatureMask::P2P,
                 load: 66,
@@ -255,19 +258,26 @@ mod tests {
                     id: "p1".into(),
                     name: "nl-physical-1".into(),
                     entry_ip: Some("203.0.113.1".into()),
+                    entry_ipv6: None,
                     exit_ip: None,
                     domain: None,
                     label: None,
                     status: 1,
                     load: Some(66),
                     public_key: Some("key1".into()),
+                    generation: None,
+                    services_down: Some(0),
+                    services_down_reason: None,
                 }],
             },
             LogicalServer {
                 id: "2".into(),
                 name: "NL#2".into(),
+                entry_country: Some("NL".into()),
                 exit_country: "NL".into(),
+                domain: None,
                 city: Some("Amsterdam".into()),
+                region: None,
                 tier: 2,
                 features: FeatureMask::P2P,
                 load: 30,
@@ -277,12 +287,16 @@ mod tests {
                     id: "p2".into(),
                     name: "nl-physical-2".into(),
                     entry_ip: Some("203.0.113.2".into()),
+                    entry_ipv6: None,
                     exit_ip: None,
                     domain: None,
                     label: None,
                     status: 1,
                     load: Some(30),
                     public_key: Some("key2".into()),
+                    generation: None,
+                    services_down: Some(0),
+                    services_down_reason: None,
                 }],
             },
         ]

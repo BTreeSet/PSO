@@ -29,6 +29,7 @@ enum Command {
     Baseline,
     Probe(ProbeArgs),
     ControlPlane(ControlPlaneArgs),
+    FetchLogicals(FetchLogicalsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -83,6 +84,16 @@ struct ControlPlaneArgs {
     peer_public_key: Option<String>,
 }
 
+#[derive(Debug, Args)]
+struct FetchLogicalsArgs {
+    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
+    access_token: String,
+    #[arg(long, default_value = "https://api.protonvpn.ch")]
+    api_base_url: String,
+    #[arg(long, default_value = "proton-logicals.json")]
+    output: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -99,6 +110,7 @@ async fn main() -> Result<()> {
         }
         Command::Probe(args) => probe(args).await,
         Command::ControlPlane(args) => control_plane(args).await,
+        Command::FetchLogicals(args) => fetch_logicals(args).await,
     }
 }
 
@@ -173,15 +185,28 @@ async fn control_plane(args: ControlPlaneArgs) -> Result<()> {
                 id: String::new(),
                 name: String::new(),
                 entry_ip: Some(args.endpoint),
+                entry_ipv6: None,
                 exit_ip: None,
                 domain: None,
                 label: None,
                 status: 1,
                 load: None,
                 public_key: args.peer_public_key,
+                generation: None,
+                services_down: Some(0),
+                services_down_reason: None,
             },
         })
         .await
+}
+
+async fn fetch_logicals(args: FetchLogicalsArgs) -> Result<()> {
+    let api = ProtonApiClient::new(args.api_base_url)?;
+    let logicals = api.get_logicals(&args.access_token).await?;
+    let value = serde_json::json!({ "LogicalServers": logicals });
+    fs::write(&args.output, serde_json::to_string_pretty(&value)?)
+        .with_context(|| format!("failed to write {}", args.output.display()))?;
+    Ok(())
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {

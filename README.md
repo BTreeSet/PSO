@@ -16,7 +16,8 @@ This repository is a runnable foundation. The renderer accepts a local Proton lo
 
 ```bash
 cp config.template.example.json config.template.json
-cp proton-logicals.example.json proton-logicals.json
+PSO_PROTON_ACCESS_TOKEN='replace-with-access-token' cargo run -- fetch-logicals \
+  --output proton-logicals.json
 cargo run -- render \
   --template config.template.json \
   --topology proton-logicals.json \
@@ -25,6 +26,8 @@ cargo run -- render \
   --session bob_free_tier@example.com:Free \
   --dry-run
 ```
+
+For offline development, `proton-logicals.example.json` contains a tiny fixture with the same top-level `LogicalServers` shape returned by `/vpn/logicals`.
 
 Remove `--dry-run` to validate the result with `sing-box check`. Add `--active-config /path/to/config.json --singbox-pid <pid>` to atomically replace the active config and send `SIGHUP`.
 
