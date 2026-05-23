@@ -10,14 +10,14 @@ PSO is a Rust control-plane scaffold for hydrating `sing-box` WireGuard outbound
 
 ## Current State
 
-This repository is a runnable foundation, not a complete Proton production client yet. The renderer accepts a local Proton logical topology JSON file and uses a static WireGuard private key supplied through `PSO_WG_PRIVATE_KEY` or `--private-key`. The production next step is replacing `StaticProvisioner` with a Proton API implementation that rotates refresh tokens and requests `/vpn/certificate` per selected physical node.
+This repository is a runnable foundation. The renderer accepts a local Proton logical topology JSON file and generates WireGuard key material locally for every hydrated outbound. The private key is never supplied by the user and is never sent to Proton. The `control-plane` command owns the live certificate refresh lifecycle by sending locally generated public keys to `/vpn/certificate`, atomically writing a sing-box config, and signaling sing-box with `SIGHUP`.
 
 ## Render a Config
 
 ```bash
 cp config.template.example.json config.template.json
 cp proton-logicals.example.json proton-logicals.json
-PSO_WG_PRIVATE_KEY='replace-with-private-key' cargo run -- render \
+cargo run -- render \
   --template config.template.json \
   --topology proton-logicals.json \
   --output rendered.config.json.tmp \
@@ -27,6 +27,18 @@ PSO_WG_PRIVATE_KEY='replace-with-private-key' cargo run -- render \
 ```
 
 Remove `--dry-run` to validate the result with `sing-box check`. Add `--active-config /path/to/config.json --singbox-pid <pid>` to atomically replace the active config and send `SIGHUP`.
+
+## Run the Control Plane
+
+```bash
+PSO_PROTON_ACCESS_TOKEN='replace-with-access-token' cargo run -- control-plane \
+  --active-config /etc/sing-box/config.json \
+  --endpoint 203.0.113.10:443 \
+  --peer-public-key replace-with-peer-public-key \
+  --outbound-tag proton-wg
+```
+
+The command discovers `sing-box` by process name when `--singbox-pid` is omitted. On every successful certificate response, PSO writes the generated WireGuard outbound atomically and sends `SIGHUP`. On refresh failure, it schedules the next attempt at the midpoint between now and certificate expiration, with a 30 second minimum delay and a four-attempt limit before rotating local key material.
 
 ## Health Probes
 
@@ -44,3 +56,7 @@ cargo run -- probe --raw-ip 198.51.100.1 --proxy-url socks5h://127.0.0.1:1081
 ```
 
 If the returned probe IP equals the raw baseline, PSO reports `Leaking`. If both Cloudflare and ipinfo fail, it reports `Dead`. Any non-baseline IP is treated as `Healthy`.
+
+## CI
+
+GitHub Actions runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` on pushes and pull requests.

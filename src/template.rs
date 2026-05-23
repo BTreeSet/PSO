@@ -91,7 +91,7 @@ mod tests {
 
     use super::*;
     use crate::model::{LogicalServer, PhysicalServer};
-    use crate::provisioning::StaticProvisioner;
+    use crate::provisioning::LocalKeyProvisioner;
     use crate::session::{SessionStore, UserSession};
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
                     public_key: Some("peer-key".into()),
                 }],
             }],
-            &StaticProvisioner::new("private-key"),
+            &LocalKeyProvisioner::default(),
         )
         .unwrap();
 
@@ -140,5 +140,6 @@ mod tests {
         assert!(outbound.get("provider").is_none());
         assert_eq!(outbound["server"], "198.51.100.10:51820");
         assert_eq!(outbound["peer_public_key"], "peer-key");
+        assert!(outbound["private_key"].as_str().unwrap().len() > 40);
     }
 }

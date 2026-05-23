@@ -1,15 +1,27 @@
+pub mod api;
+pub mod control_plane;
+pub mod crypto;
 pub mod deploy;
 pub mod filter;
 pub mod health;
 pub mod model;
+pub mod process;
 pub mod provisioning;
+pub mod scheduler;
 pub mod session;
+pub mod singbox_adapter;
 pub mod template;
 
+pub use api::{CertificateRequest, CertificateResponse, ProtonApiClient};
+pub use control_plane::{ControlPlane, ControlPlaneConfig};
+pub use crypto::{KeyMaterial, generate_key_material};
 pub use deploy::{DeployPlan, deploy_with_sighup};
 pub use filter::{FeatureMask, ServerFilter, select_target};
 pub use health::{HealthMonitor, HealthStatus, ProbeResult};
 pub use model::{LogicalServer, PhysicalServer};
-pub use provisioning::{StaticProvisioner, WireGuardCredentials, WireGuardProvisioner};
+pub use process::{find_process_pid, sighup_process};
+pub use provisioning::{LocalKeyProvisioner, WireGuardCredentials, WireGuardProvisioner};
+pub use scheduler::{RefreshDecision, RefreshScheduler};
 pub use session::{ActiveOutbound, SessionStore, UserSession};
+pub use singbox_adapter::{SingboxWireGuardOutbound, build_wireguard_outbound};
 pub use template::hydrate_template;

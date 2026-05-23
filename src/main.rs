@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use pso::api::ProtonApiClient;
+use pso::control_plane::{ControlPlane, ControlPlaneConfig};
 use pso::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use pso::health::HealthMonitor;
-use pso::model::ProtonLogicalResponse;
-use pso::provisioning::StaticProvisioner;
+use pso::model::{PhysicalServer, ProtonLogicalResponse};
+use pso::process::find_process_pid;
+use pso::provisioning::LocalKeyProvisioner;
 use pso::session::{SessionStore, UserSession};
 use pso::template::hydrate_template;
 use serde_json::Value;
@@ -25,6 +28,7 @@ enum Command {
     Render(RenderArgs),
     Baseline,
     Probe(ProbeArgs),
+    ControlPlane(ControlPlaneArgs),
 }
 
 #[derive(Debug, Args)]
@@ -41,8 +45,6 @@ struct RenderArgs {
     singbox_pid: Option<i32>,
     #[arg(long, default_value = "sing-box")]
     singbox_bin: PathBuf,
-    #[arg(long, env = "PSO_WG_PRIVATE_KEY")]
-    private_key: String,
     #[arg(long = "session", value_parser = parse_session, required = true)]
     sessions: Vec<(String, String)>,
     #[arg(long)]
@@ -63,6 +65,24 @@ struct ProbeArgs {
     outbound_tag: String,
 }
 
+#[derive(Debug, Args)]
+struct ControlPlaneArgs {
+    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
+    access_token: String,
+    #[arg(long, default_value = "https://api.protonvpn.ch")]
+    api_base_url: String,
+    #[arg(long)]
+    active_config: PathBuf,
+    #[arg(long)]
+    singbox_pid: Option<i32>,
+    #[arg(long, default_value = "proton-wg")]
+    outbound_tag: String,
+    #[arg(long)]
+    endpoint: String,
+    #[arg(long)]
+    peer_public_key: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -78,6 +98,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Probe(args) => probe(args).await,
+        Command::ControlPlane(args) => control_plane(args).await,
     }
 }
 
@@ -89,7 +110,7 @@ async fn render(args: RenderArgs) -> Result<()> {
         sessions.insert(UserSession::new(username, tier));
     }
 
-    let provisioner = StaticProvisioner::new(args.private_key);
+    let provisioner = LocalKeyProvisioner::default();
     let rendered = hydrate_template(
         &template,
         &sessions,
@@ -133,6 +154,34 @@ async fn probe(args: ProbeArgs) -> Result<()> {
         println!("{result:?}");
         Ok(())
     }
+}
+
+async fn control_plane(args: ControlPlaneArgs) -> Result<()> {
+    let singbox_pid = match args.singbox_pid {
+        Some(pid) => pid,
+        None => find_process_pid("sing-box").context("sing-box process was not found")?,
+    };
+    let api = ProtonApiClient::new(args.api_base_url)?;
+    let control_plane = ControlPlane::new(api);
+    control_plane
+        .run_refresh_loop(ControlPlaneConfig {
+            access_token: args.access_token,
+            active_config: args.active_config,
+            singbox_pid,
+            outbound_tag: args.outbound_tag,
+            selected_server: PhysicalServer {
+                id: String::new(),
+                name: String::new(),
+                entry_ip: Some(args.endpoint),
+                exit_ip: None,
+                domain: None,
+                label: None,
+                status: 1,
+                load: None,
+                public_key: args.peer_public_key,
+            },
+        })
+        .await
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {

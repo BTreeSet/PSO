@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 
+use crate::crypto::generate_key_material;
 use crate::model::PhysicalServer;
 use crate::session::UserSession;
 
@@ -21,34 +22,35 @@ pub trait WireGuardProvisioner {
 }
 
 #[derive(Clone, Debug)]
-pub struct StaticProvisioner {
-    private_key: String,
+pub struct LocalKeyProvisioner {
     local_address: Vec<String>,
     default_port: u16,
 }
 
-impl StaticProvisioner {
-    pub fn new(private_key: impl Into<String>) -> Self {
+impl Default for LocalKeyProvisioner {
+    fn default() -> Self {
         Self {
-            private_key: private_key.into(),
             local_address: vec!["10.2.0.2/32".into()],
             default_port: 51820,
         }
     }
+}
 
+impl LocalKeyProvisioner {
     pub fn with_local_address(mut self, local_address: Vec<String>) -> Self {
         self.local_address = local_address;
         self
     }
 }
 
-impl WireGuardProvisioner for StaticProvisioner {
+impl WireGuardProvisioner for LocalKeyProvisioner {
     fn provision(
         &self,
-        session: &UserSession,
+        _session: &UserSession,
         outbound_tag: &str,
         server: &PhysicalServer,
     ) -> Result<WireGuardCredentials> {
+        let key_material = generate_key_material();
         let endpoint = server
             .entry_ip
             .as_deref()
@@ -58,17 +60,10 @@ impl WireGuardProvisioner for StaticProvisioner {
             anyhow!("selected server for {outbound_tag} has no WireGuard public key")
         })?;
 
-        if self.private_key.is_empty() {
-            return Err(anyhow!(
-                "missing private key for {}; real deployments should request /vpn/certificate",
-                session.username
-            ));
-        }
-
         Ok(WireGuardCredentials {
             server: format!("{endpoint}:{}", self.default_port),
             local_address: self.local_address.clone(),
-            private_key: self.private_key.clone(),
+            private_key: key_material.private_key_base64,
             peer_public_key,
         })
     }

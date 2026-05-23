@@ -46,17 +46,12 @@ impl CountryFilter {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SortMode {
+    #[default]
     LoadAsc,
     ScoreDesc,
-}
-
-impl Default for SortMode {
-    fn default() -> Self {
-        Self::LoadAsc
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -133,37 +128,36 @@ pub fn tier_to_proton_value(tier: &str) -> Result<u8> {
 }
 
 fn logical_matches(logical: &LogicalServer, filter: &ServerFilter, max_tier: u8) -> bool {
-    if let Some(country) = &filter.country {
-        if !country.contains(&logical.exit_country) {
-            return false;
-        }
+    if let Some(country) = &filter.country
+        && !country.contains(&logical.exit_country)
+    {
+        return false;
     }
 
-    if let Some(city) = &filter.city {
-        if logical
+    if let Some(city) = &filter.city
+        && logical
             .city
             .as_deref()
             .map(|value| !value.eq_ignore_ascii_case(city))
             .unwrap_or(true)
-        {
-            return false;
-        }
+    {
+        return false;
     }
 
     if logical.tier > max_tier {
         return false;
     }
 
-    if let Some(max_load) = filter.max_load {
-        if logical.load > max_load {
-            return false;
-        }
+    if let Some(max_load) = filter.max_load
+        && logical.load > max_load
+    {
+        return false;
     }
 
-    if let Some(status) = filter.status {
-        if logical.status != status {
-            return false;
-        }
+    if let Some(status) = filter.status
+        && logical.status != status
+    {
+        return false;
     }
 
     filter
