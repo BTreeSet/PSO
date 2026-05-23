@@ -10,7 +10,7 @@ PSO is a Rust control-plane scaffold for hydrating `sing-box` WireGuard outbound
 
 ## Current State
 
-This repository is a runnable foundation. PSO can fetch Proton logical topology from `/vpn/logicals`, perform SRP-based login, fork a VPN-scoped session, and cache the VPN refresh token in the OS keyring. The renderer generates WireGuard key material locally for every hydrated outbound. The private key is never supplied by the user and is never sent to Proton. The `control-plane` command owns the live certificate refresh lifecycle by sending locally generated public keys to `/vpn/certificate`, atomically writing a sing-box config, and signaling sing-box with `SIGHUP`.
+This repository is a runnable foundation. PSO can fetch Proton logical topology from `/vpn/logicals`, perform SRP-based login, fork a VPN-scoped session, and cache the VPN refresh token in a headless-friendly session file. The renderer generates WireGuard key material locally for every hydrated outbound. The private key is never supplied by the user and is never sent to Proton. The `control-plane` command owns the live certificate refresh lifecycle by sending locally generated public keys to `/vpn/certificate`, atomically writing a sing-box config, and signaling sing-box with `SIGHUP`.
 
 ## Login and Session Fork
 
@@ -24,7 +24,7 @@ cargo run -- login \
 
 For noninteractive deployments, supply the password through `PSO_PROTON_PASSWORD`, `--password`, `PSO_PROTON_PASSWORD_FILE`, or `--password-file`. Add `--no-prompt` in containers so missing credentials fail fast instead of blocking for input. If Proton reports that two-factor authentication is enabled, supply `PSO_PROTON_TOTP` or `--totp`.
 
-By default, the command stores the VPN refresh token in the OS keyring under the username and prints the current VPN-scoped token response to stdout unless `--output vpn-session.json` is supplied. In Docker, use a mounted file cache instead of the OS keyring:
+By default, the command stores the VPN refresh token in `vpn-session.json` and prints the current VPN-scoped token response to stdout unless `--output vpn-session.json` is supplied. In Docker, mount the session cache path on durable storage:
 
 ```bash
 PSO_PROTON_PASSWORD_FILE=/run/secrets/proton_password \
@@ -106,3 +106,5 @@ If the returned probe IP equals the raw baseline, PSO reports `Leaking`. If both
 ## CI
 
 GitHub Actions runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` on pushes and pull requests. The container job builds `linux/amd64` and `linux/arm64` images with Docker Buildx and publishes to GHCR for non-PR runs. The runtime image is Alpine-based and bundles `sing-box` by copying `/usr/local/bin/sing-box` from `ghcr.io/sagernet/sing-box:latest` into the PSO image.
+
+Dependency review notes live in `docs/dependencies.md`. Dependabot tracks Cargo, GitHub Actions, and Docker updates weekly.
