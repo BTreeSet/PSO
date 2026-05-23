@@ -20,7 +20,7 @@ PSO separates runtime inputs into three categories:
 
 - App binary: the `pso` executable and the bundled `sing-box` binary in container builds.
 - Declarative configuration: files the operator edits, such as `config.template.json`.
-- State directory: an opaque directory managed by PSO for data that must persist across reboots, including VPN session state and the last known Proton logical topology.
+- State directory: an opaque directory managed by PSO for data that must persist across reboots, including per-account VPN session state and the last known Proton logical topology.
 
 The state directory defaults to `pso-state` for local runs. In containers, mount it on durable storage and set `PSO_STATE_DIR`, for example `/var/lib/pso`.
 
@@ -175,6 +175,21 @@ If the returned probe IP equals the raw baseline, PSO reports `Leaking`. If both
 ## Containers
 
 The Dockerfile builds PSO and copies `/usr/local/bin/sing-box` from `ghcr.io/sagernet/sing-box:latest` into an Alpine runtime image. The GitHub Actions workflow builds `linux/amd64` and `linux/arm64` images and publishes to GHCR for non-PR runs.
+
+The container default command is:
+
+```bash
+pso --config /etc/pso/pso.config.json --state-dir /var/lib/pso run
+```
+
+The intended Docker setup mounts:
+
+- `pso.config.json` at `/etc/pso/pso.config.json`
+- `config.template.json` at the path referenced by config
+- a durable state volume at `/var/lib/pso`
+- password material as a Docker secret or equivalent mounted file
+
+See `docker-compose.example.yml` for the minimal layout. VPN session state is written per account under `state/users/<username>/vpn-session.json`, with unsafe path characters normalized.
 
 Docker is not required for local Rust development.
 

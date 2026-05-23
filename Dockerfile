@@ -17,3 +17,4 @@ RUN set -ex \
 COPY --from=builder /src/target/release/pso /usr/local/bin/pso
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 ENTRYPOINT ["/usr/local/bin/pso"]
+CMD ["--config", "/etc/pso/pso.config.json", "--state-dir", "/var/lib/pso", "run"]

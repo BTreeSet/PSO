@@ -1,0 +1,27 @@
+services:
+  pso:
+    image: ghcr.io/OWNER/REPOSITORY:latest
+    container_name: pso
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      PSO_PROTON_PASSWORD_FILE: /run/secrets/proton_password
+      PSO_PROTON_TOTP: ${PSO_PROTON_TOTP:?set-a-base32-totp-secret-or-current-code}
+    volumes:
+      - ./pso.config.json:/etc/pso/pso.config.json:ro
+      - ./config.template.json:/etc/pso/config.template.json:ro
+      - pso-state:/var/lib/pso
+      - singbox-config:/etc/sing-box
+    secrets:
+      - proton_password
+
+secrets:
+  proton_password:
+    file: ./secrets/proton_password
+
+volumes:
+  pso-state:
+  singbox-config:

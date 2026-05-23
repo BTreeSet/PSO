@@ -318,7 +318,12 @@ async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Res
     let monitor = HealthMonitor::new(raw_ip, interval)?;
 
     loop {
-        let access_token = resolve_run_access_token(context, args.access_token.as_deref()).await?;
+        let access_token = resolve_run_access_token(
+            context,
+            args.access_token.as_deref(),
+            run_username(config).as_deref(),
+        )
+        .await?;
         let topology_output = config
             .render
             .topology
@@ -369,12 +374,16 @@ async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Res
 async fn resolve_run_access_token(
     context: &RuntimeContext,
     access_token: Option<&str>,
+    username: Option<&str>,
 ) -> Result<String> {
     if let Some(access_token) = access_token {
         return Ok(access_token.to_string());
     }
 
-    let session_state = context.state_dir.join("vpn-session.json");
+    let username = username.context(
+        "username is required to refresh VPN token from state; set auth.username or pass access token",
+    )?;
+    let session_state = vpn_session_state_file(context, username);
     let state = load_vpn_session_state(&session_state)?;
     let api = ProtonApiClient::new(&context.api_base_url)?;
     let refreshed: AuthTokens = api
@@ -646,7 +655,7 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
     store_vpn_session_state(
         &uid,
         &vpn.refresh_token,
-        &context.state_dir.join("vpn-session.json"),
+        &vpn_session_state_file(context, &username),
     )?;
 
     if let Some(output) = args.output {
@@ -664,11 +673,11 @@ async fn refresh_vpn_token(
     config: &AuthConfig,
     args: RefreshVpnTokenArgs,
 ) -> Result<()> {
-    let _username = args
+    let username = args
         .username
         .or(config.username.clone())
         .context("username is required; pass --username or set auth.username in config")?;
-    let session_state = context.state_dir.join("vpn-session.json");
+    let session_state = vpn_session_state_file(context, &username);
     let state = load_vpn_session_state(&session_state)?;
     let api = ProtonApiClient::new(&context.api_base_url)?;
     let refreshed = api
@@ -694,6 +703,34 @@ fn store_vpn_session_state(uid: &str, refresh_token: &str, state_file: &PathBuf)
     };
     let text = serde_json::to_string(&state)?;
     write_state_file(state_file, &text)
+}
+
+fn run_username(config: &AppConfig) -> Option<String> {
+    config.auth.username.clone().or_else(|| {
+        config
+            .render
+            .sessions
+            .first()
+            .map(|session| session.username.clone())
+    })
+}
+
+fn vpn_session_state_file(context: &RuntimeContext, username: &str) -> PathBuf {
+    context
+        .state_dir
+        .join("users")
+        .join(sanitize_state_component(username))
+        .join("vpn-session.json")
+}
+
+fn sanitize_state_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => character,
+            _ => '_',
+        })
+        .collect()
 }
 
 fn load_vpn_session_state(state_file: &PathBuf) -> Result<VpnSessionState> {

@@ -10,7 +10,7 @@ Keep three runtime concepts separate:
 
 - App binary: `pso` and, in containers, the bundled `sing-box` binary.
 - Declarative configuration: operator-authored files such as `pso.config.json` and `config.template.json`.
-- State directory: user-opaque persistent runtime data managed by PSO, such as VPN session state and Proton topology state.
+- State directory: user-opaque persistent runtime data managed by PSO, such as per-account VPN session state and Proton topology state.
 
 ## Architecture Rules
 
@@ -21,6 +21,7 @@ Keep three runtime concepts separate:
 - Prefer explicit `sing-box` targeting by PID or executable path. Name-based process lookup is only a last fallback.
 - Auth flows must support headless operation: password file/env, TOTP secret/env, mounted state directory, and CAPTCHA token retry.
 - Health and recovery should be automatic in the `run` path. Manual commands should remain useful for troubleshooting but should not be the primary operational model.
+- Multi-account work must keep each Proton account isolated in state and refresh WireGuard identity independently.
 
 ## Code Style
 
