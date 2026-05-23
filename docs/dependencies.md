@@ -18,6 +18,7 @@ The current direct runtime dependency graph was captured with `cargo tree -e nor
 - `reqwest 0.13.3`: Proton HTTP client, with only `json`, `query`, and `rustls` features enabled.
 - `rpassword 7.5.3`: hidden password/TOTP prompt for rare interactive CLI runs.
 - `serde 1.0.228`, `serde_json 1.0.150`: API/config serialization.
+- `sha1 0.11.0`: RFC 6238 TOTP code derivation from long-term 2FA secrets.
 - `sha2 0.11.0`: SRP hashing.
 - `sysinfo 0.39.2`: sing-box process discovery.
 - `tempfile 3.27.0`: atomic config write support.

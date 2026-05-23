@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use pso::api::ProtonApiClient;
-use pso::auth::calculate_srp_proof;
+use pso::auth::{calculate_srp_proof, resolve_two_factor_code};
 use pso::control_plane::{ControlPlane, ControlPlaneConfig};
 use pso::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use pso::health::HealthMonitor;
@@ -99,7 +99,9 @@ struct FetchLogicalsArgs {
     #[arg(long, env = "PSO_STATE_DIR", default_value = "pso-state")]
     state_dir: PathBuf,
     #[arg(long)]
-    no_state_fallback: bool,
+    fallback_topology: Option<PathBuf>,
+    #[arg(long)]
+    require_live: bool,
 }
 
 #[derive(Debug, Args)]
@@ -112,7 +114,11 @@ struct LoginArgs {
     password_file: Option<PathBuf>,
     #[arg(long)]
     no_prompt: bool,
-    #[arg(long, env = "PSO_PROTON_TOTP")]
+    #[arg(
+        long,
+        env = "PSO_PROTON_TOTP",
+        help = "Six-digit 2FA code, base32 TOTP secret, or otpauth:// URI"
+    )]
     totp: Option<String>,
     #[arg(long)]
     human_verification_token: Option<String>,
@@ -263,19 +269,49 @@ async fn fetch_logicals(args: FetchLogicalsArgs) -> Result<()> {
                 .with_context(|| format!("failed to write {}", args.output.display()))?;
             write_state_file(&state_logicals, &text)?;
         }
-        Err(error) if !args.no_state_fallback && state_logicals.exists() => {
-            eprintln!(
-                "warning: /vpn/logicals fetch failed, using state topology from {}: {error:#}",
-                state_logicals.display()
-            );
-            let state: ProtonLogicalResponse = read_json(&state_logicals)?;
-            let value = serde_json::json!({ "LogicalServers": state.into_servers() });
-            fs::write(&args.output, serde_json::to_string_pretty(&value)?)
-                .with_context(|| format!("failed to write {}", args.output.display()))?;
-        }
-        Err(error) => return Err(error),
+        Err(error) if args.require_live => return Err(error),
+        Err(error) => write_logicals_from_available_state(
+            &args.output,
+            &state_logicals,
+            args.fallback_topology.as_ref(),
+            error,
+        )?,
     }
     Ok(())
+}
+
+fn write_logicals_from_available_state(
+    output: &PathBuf,
+    state_logicals: &PathBuf,
+    fallback_topology: Option<&PathBuf>,
+    error: anyhow::Error,
+) -> Result<()> {
+    let source = match fallback_topology {
+        Some(path) if path.exists() => {
+            eprintln!(
+                "warning: /vpn/logicals fetch failed, using fallback topology from {}: {error:#}",
+                path.display()
+            );
+            path
+        }
+        _ if state_logicals.exists() => {
+            eprintln!(
+                "warning: /vpn/logicals fetch failed, using topology state from {}: {error:#}",
+                state_logicals.display()
+            );
+            state_logicals
+        }
+        Some(path) => anyhow::bail!(
+            "/vpn/logicals fetch failed and fallback topology {} does not exist: {error:#}",
+            path.display()
+        ),
+        None => return Err(error),
+    };
+
+    let logicals: ProtonLogicalResponse = read_json(source)?;
+    let value = serde_json::json!({ "LogicalServers": logicals.into_servers() });
+    fs::write(output, serde_json::to_string_pretty(&value)?)
+        .with_context(|| format!("failed to write {}", output.display()))
 }
 
 async fn login(args: LoginArgs) -> Result<()> {
@@ -301,13 +337,18 @@ async fn login(args: LoginArgs) -> Result<()> {
         anyhow::bail!("unsupported Proton SRP auth version {}", info.version);
     }
 
-    let totp = if info.two_factor.unwrap_or(0) > 0 && args.totp.is_none() && !args.no_prompt {
-        Some(rpassword::prompt_password("Proton TOTP: ")?)
-    } else if info.two_factor.unwrap_or(0) > 0 && args.totp.is_none() {
-        anyhow::bail!("TOTP is required for this account; pass --totp or PSO_PROTON_TOTP")
-    } else {
-        args.totp
-    };
+    let two_factor_input =
+        if info.two_factor.unwrap_or(0) > 0 && args.totp.is_none() && !args.no_prompt {
+            Some(rpassword::prompt_password("Proton TOTP: ")?)
+        } else if info.two_factor.unwrap_or(0) > 0 && args.totp.is_none() {
+            anyhow::bail!("TOTP is required for this account; pass --totp or PSO_PROTON_TOTP")
+        } else {
+            args.totp
+        };
+    let totp = two_factor_input
+        .as_deref()
+        .map(resolve_two_factor_code)
+        .transpose()?;
 
     let proof = calculate_srp_proof(
         &args.username,

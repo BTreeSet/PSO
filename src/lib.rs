@@ -14,7 +14,7 @@ pub mod singbox_adapter;
 pub mod template;
 
 pub use api::{CertificateRequest, CertificateResponse, ProtonApiClient};
-pub use auth::{SrpProof, calculate_srp_proof};
+pub use auth::{SrpProof, calculate_srp_proof, resolve_two_factor_code};
 pub use control_plane::{ControlPlane, ControlPlaneConfig};
 pub use crypto::{KeyMaterial, generate_key_material};
 pub use deploy::{DeployPlan, deploy_with_sighup};
