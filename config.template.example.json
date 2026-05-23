@@ -1,0 +1,40 @@
+{
+    "outbounds": [
+        {
+            "type": "wireguard",
+            "tag": "proton-p2p-nl",
+            "provider": "proton",
+            "user": "alice@example.com",
+            "filter": {
+                "country": [
+                    "NL",
+                    "CH"
+                ],
+                "city": "Amsterdam",
+                "tier": "Plus",
+                "features": {
+                    "secure_core": false,
+                    "p2p": true,
+                    "tor": false,
+                    "stream": false
+                },
+                "max_load": 75,
+                "status": 1,
+                "sort_by": "load_asc"
+            }
+        },
+        {
+            "type": "wireguard",
+            "tag": "proton-free-jp",
+            "provider": "proton",
+            "user": "bob_free_tier@example.com",
+            "filter": {
+                "country": [
+                    "JP"
+                ],
+                "tier": "Free",
+                "sort_by": "score_desc"
+            }
+        }
+    ]
+}
