@@ -166,8 +166,10 @@ where
         }
     }
 
-    Err(last_error.expect("retry loop exits with an error"))
-        .context("failed to send Proton API request")
+    match last_error {
+        Some(error) => Err(error).context("failed to send Proton API request"),
+        None => bail!("Proton API retry loop ended without a response"),
+    }
 }
 
 fn is_retryable(status: StatusCode) -> bool {

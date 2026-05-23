@@ -1,4 +1,7 @@
-use anyhow::{Result, anyhow};
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result, anyhow};
 use sysinfo::{ProcessesToUpdate, System};
 
 pub fn find_process_pid(process_name: &str) -> Option<i32> {
@@ -8,6 +11,21 @@ pub fn find_process_pid(process_name: &str) -> Option<i32> {
         .processes()
         .iter()
         .find_map(|(pid, process)| (process.name() == process_name).then_some(pid.as_u32() as i32))
+}
+
+pub fn find_process_pid_by_exe(executable: &Path) -> Result<Option<i32>> {
+    let target = fs::canonicalize(executable)
+        .with_context(|| format!("failed to resolve {}", executable.display()))?;
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+
+    Ok(system.processes().iter().find_map(|(pid, process)| {
+        process
+            .exe()
+            .and_then(|path| fs::canonicalize(path).ok())
+            .filter(|path| path == &target)
+            .map(|_| pid.as_u32() as i32)
+    }))
 }
 
 pub fn sighup_process(pid: i32) -> Result<()> {

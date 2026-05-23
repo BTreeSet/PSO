@@ -1,21 +1,22 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use pso::api::ProtonApiClient;
+use pso::api::{AuthTokens, ProtonApiClient};
 use pso::auth::{calculate_srp_proof, resolve_two_factor_code};
 use pso::control_plane::{ControlPlane, ControlPlaneConfig};
 use pso::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
-use pso::health::HealthMonitor;
+use pso::health::{HealthMonitor, HealthStatus};
 use pso::model::{PhysicalServer, ProtonLogicalResponse};
-use pso::process::find_process_pid;
+use pso::process::{find_process_pid, find_process_pid_by_exe};
 use pso::provisioning::LocalKeyProvisioner;
 use pso::session::{SessionStore, UserSession};
 use pso::template::hydrate_template;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::time::sleep;
 use tracing::info;
 
 #[derive(Debug, Parser)]
@@ -33,6 +34,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Run(RunArgs),
     Render(RenderArgs),
     Health(HealthArgs),
     ControlPlane(ControlPlaneArgs),
@@ -96,6 +98,20 @@ struct RenderArgs {
 }
 
 #[derive(Debug, Args)]
+struct RunArgs {
+    #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
+    access_token: Option<String>,
+    #[arg(long)]
+    raw_ip: Option<String>,
+    #[arg(long)]
+    proxy_url: Option<String>,
+    #[arg(long)]
+    once: bool,
+    #[arg(long)]
+    interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Args)]
 struct ProbeArgs {
     #[arg(long)]
     raw_ip: Option<String>,
@@ -117,6 +133,8 @@ struct ControlPlaneArgs {
     active_config: Option<PathBuf>,
     #[arg(long)]
     singbox_pid: Option<i32>,
+    #[arg(long)]
+    singbox_bin: Option<PathBuf>,
     #[arg(long)]
     outbound_tag: Option<String>,
     #[arg(long)]
@@ -184,6 +202,7 @@ struct AppConfig {
     topology: TopologyConfig,
     render: RenderConfig,
     control_plane: ControlPlaneDefaults,
+    run: RunConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -228,9 +247,17 @@ struct SessionEntry {
 struct ControlPlaneDefaults {
     active_config: Option<PathBuf>,
     singbox_pid: Option<i32>,
+    singbox_bin: Option<PathBuf>,
     outbound_tag: Option<String>,
     endpoint: Option<String>,
     peer_public_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct RunConfig {
+    proxy_url: Option<String>,
+    interval_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -259,6 +286,7 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
+        Command::Run(args) => run(&context, &config, args).await,
         Command::Render(args) => render(&config.render, args).await,
         Command::Health(args) => match args.command {
             HealthCommand::Baseline => {
@@ -277,6 +305,88 @@ async fn main() -> Result<()> {
             TopologyCommand::Fetch(args) => fetch_logicals(&context, &config.topology, args).await,
         },
     }
+}
+
+async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Result<()> {
+    let interval = Duration::from_secs(
+        args.interval_secs
+            .or(config.run.interval_secs)
+            .unwrap_or(300),
+    );
+    let proxy_url = args.proxy_url.or(config.run.proxy_url.clone());
+    let raw_ip = match args.raw_ip {
+        Some(ip) => ip,
+        None => HealthMonitor::acquire_baseline().await?,
+    };
+    let monitor = HealthMonitor::new(raw_ip, interval)?;
+
+    loop {
+        let access_token = resolve_run_access_token(context, args.access_token.as_deref()).await?;
+        let topology_output = config
+            .render
+            .topology
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("proton-logicals.json"));
+        fetch_logicals(
+            context,
+            &config.topology,
+            FetchLogicalsArgs {
+                access_token,
+                output: topology_output,
+                fallback_topology: None,
+                require_live: false,
+            },
+        )
+        .await?;
+
+        render(
+            &config.render,
+            RenderArgs {
+                template: None,
+                topology: None,
+                output: None,
+                active_config: None,
+                singbox_pid: None,
+                singbox_bin: None,
+                sessions: Vec::new(),
+                dry_run: false,
+            },
+        )
+        .await?;
+
+        let probe = monitor.probe_once(proxy_url.as_deref()).await;
+        if probe.status != HealthStatus::Healthy {
+            eprintln!(
+                "warning: health probe reported {:?}; next cycle will refresh state and render again",
+                probe.status
+            );
+        }
+
+        if args.once {
+            return Ok(());
+        }
+        sleep(interval).await;
+    }
+}
+
+async fn resolve_run_access_token(
+    context: &RuntimeContext,
+    access_token: Option<&str>,
+) -> Result<String> {
+    if let Some(access_token) = access_token {
+        return Ok(access_token.to_string());
+    }
+
+    let session_state = context.state_dir.join("vpn-session.json");
+    let state = load_vpn_session_state(&session_state)?;
+    let api = ProtonApiClient::new(&context.api_base_url)?;
+    let refreshed: AuthTokens = api
+        .refresh_session(&state.uid, &state.refresh_token)
+        .await
+        .context("failed to refresh VPN token from state")?;
+    let uid = refreshed.uid.as_deref().unwrap_or(&state.uid);
+    store_vpn_session_state(uid, &refreshed.refresh_token, &session_state)?;
+    Ok(refreshed.access_token)
 }
 
 async fn render(config: &RenderConfig, args: RenderArgs) -> Result<()> {
@@ -359,9 +469,13 @@ async fn control_plane(
     config: &ControlPlaneDefaults,
     args: ControlPlaneArgs,
 ) -> Result<()> {
+    let singbox_bin = args
+        .singbox_bin
+        .or(config.singbox_bin.clone())
+        .unwrap_or_else(|| PathBuf::from("sing-box"));
     let singbox_pid = match args.singbox_pid.or(config.singbox_pid) {
         Some(pid) => pid,
-        None => find_process_pid("sing-box").context("sing-box process was not found")?,
+        None => resolve_singbox_pid(&singbox_bin)?,
     };
     let active_config = args
         .active_config
@@ -631,6 +745,23 @@ fn resolve_sessions(
         )
     }
     Ok(sessions)
+}
+
+fn resolve_singbox_pid(singbox_bin: &Path) -> Result<i32> {
+    match find_process_pid_by_exe(singbox_bin) {
+        Ok(Some(pid)) => Ok(pid),
+        Ok(None) => find_process_pid("sing-box").with_context(|| {
+            format!(
+                "sing-box process was not found for executable {}; pass --singbox-pid to target an explicit process",
+                singbox_bin.display()
+            )
+        }),
+        Err(error) => find_process_pid("sing-box").with_context(|| {
+            format!(
+                "failed to match sing-box executable path ({error:#}); pass --singbox-pid to target an explicit process"
+            )
+        }),
+    }
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {

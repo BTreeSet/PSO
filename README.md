@@ -32,6 +32,27 @@ pso --config pso.config.json --state-dir /var/lib/pso <command>
 
 Long-lived settings can be placed in `pso.config.json`, including auth defaults, topology fallback, render sessions, and control-plane paths. See `pso.config.example.json`.
 
+## Intended Operation
+
+The normal runtime path is `pso run`. It is designed for a compiled binary or container with a mounted state directory:
+
+```bash
+PSO_STATE_DIR=/var/lib/pso \
+PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
+pso --config /etc/pso/pso.config.json run
+```
+
+On each cycle, `run` refreshes the VPN access token from state when a token is not supplied, fetches Proton topology into state, renders the configured `sing-box` output, validates/deploys when render settings include an active config and PID, runs a health probe, and repeats. If the topology API is temporarily unavailable, the same fallback rules as `topology fetch` apply. If health reports `Dead` or `Leaking`, the next cycle refreshes state and renders again.
+
+Certificate rotation is handled by the certificate refresh loop used by `control-plane`: PSO requests a new `/vpn/certificate` before Proton's refresh timestamp, retries temporary failures, rotates local key material after retry exhaustion, writes the updated `sing-box` config, and sends SIGHUP.
+
+Use the grouped subcommands for setup and troubleshooting:
+
+- `auth login` and `auth refresh` manage VPN session state.
+- `topology fetch` updates topology state.
+- `render` produces or deploys a `sing-box` config once.
+- `health baseline` and `health probe` inspect IP behavior.
+
 ## Authentication
 
 Run the Proton SRP login flow and fork the primary account session into a VPN-scoped session:
@@ -132,7 +153,7 @@ PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
 cargo run -- --config pso.config.json control-plane
 ```
 
-If `--singbox-pid` is omitted, PSO searches for a `sing-box` process. On every successful certificate response, PSO writes the generated WireGuard outbound atomically and sends SIGHUP. On refresh failure, it schedules the next attempt at the midpoint between now and certificate expiration, with a 30 second minimum delay and a four-attempt limit before rotating local key material.
+If `--singbox-pid` is omitted, PSO first tries to match the configured `--singbox-bin` or `control_plane.singbox_bin` executable path to a running process. This is the preferred mode when a host has more than one `sing-box` binary. Name-based lookup is only a fallback when the executable path cannot be resolved. On every successful certificate response, PSO writes the generated WireGuard outbound atomically and sends SIGHUP. On refresh failure, it schedules the next attempt at the midpoint between now and certificate expiration, with a 30 second minimum delay and a four-attempt limit before rotating local key material.
 
 ## Health Probes
 
@@ -145,7 +166,6 @@ cargo run -- health baseline
 Probe once through the default network path or through a proxy exposed by a specific outbound:
 
 ```bash
-cargo run -- health baseline
 cargo run -- health probe --raw-ip 198.51.100.1
 cargo run -- health probe --raw-ip 198.51.100.1 --proxy-url socks5h://127.0.0.1:1081
 ```
@@ -157,6 +177,12 @@ If the returned probe IP equals the raw baseline, PSO reports `Leaking`. If both
 The Dockerfile builds PSO and copies `/usr/local/bin/sing-box` from `ghcr.io/sagernet/sing-box:latest` into an Alpine runtime image. The GitHub Actions workflow builds `linux/amd64` and `linux/arm64` images and publishes to GHCR for non-PR runs.
 
 Docker is not required for local Rust development.
+
+## Releases
+
+End users should use compiled release artifacts or container images, not Cargo. Tagged releases publish a Linux amd64 binary archive through GitHub Releases, and the CI/CD pipeline publishes multi-arch container images to GHCR.
+
+Local Cargo commands in this README are development examples. For release binaries, replace `cargo run --` with `pso`.
 
 ## Development
 
