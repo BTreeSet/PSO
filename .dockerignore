@@ -1,0 +1,8 @@
+/target/
+/.git/
+/.github/
+*.log
+.env
+proton-logicals.cache.json
+vpn-session.json
+rendered.config.json.tmp

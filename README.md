@@ -22,7 +22,18 @@ cargo run -- login \
   --totp 123456
 ```
 
-If `--password` is omitted, PSO prompts without echoing input. If Proton reports that two-factor authentication is enabled and `--totp` is omitted, PSO prompts for the TOTP code. The command stores the VPN refresh token in the OS keyring under the username and prints the current VPN-scoped token response to stdout unless `--output vpn-session.json` is supplied.
+For noninteractive deployments, supply the password through `PSO_PROTON_PASSWORD`, `--password`, `PSO_PROTON_PASSWORD_FILE`, or `--password-file`. Add `--no-prompt` in containers so missing credentials fail fast instead of blocking for input. If Proton reports that two-factor authentication is enabled, supply `PSO_PROTON_TOTP` or `--totp`.
+
+By default, the command stores the VPN refresh token in the OS keyring under the username and prints the current VPN-scoped token response to stdout unless `--output vpn-session.json` is supplied. In Docker, use a mounted file cache instead of the OS keyring:
+
+```bash
+PSO_PROTON_PASSWORD_FILE=/run/secrets/proton_password \
+PSO_VPN_SESSION_CACHE=/var/lib/pso/vpn-session.json \
+cargo run -- login \
+  --username alice@example.com \
+  --totp 123456 \
+  --no-prompt
+```
 
 When Proton requires human verification, PSO returns the verification challenge details. Complete the challenge in a browser, then rerun the failed command with:
 
@@ -35,7 +46,9 @@ cargo run -- login \
 On later boots, refresh the cached VPN session without replaying the password flow:
 
 ```bash
-cargo run -- refresh-vpn-token --username alice@example.com
+cargo run -- refresh-vpn-token \
+  --username alice@example.com \
+  --session-cache-file /var/lib/pso/vpn-session.json
 ```
 
 ## Render a Config
@@ -44,7 +57,8 @@ cargo run -- refresh-vpn-token --username alice@example.com
 cp config.template.example.json config.template.json
 cargo run -- refresh-vpn-token --username alice@example.com --output vpn-session.json
 PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' cargo run -- fetch-logicals \
-  --output proton-logicals.json
+  --output proton-logicals.json \
+  --cache proton-logicals.cache.json
 cargo run -- render \
   --template config.template.json \
   --topology proton-logicals.json \
@@ -55,6 +69,8 @@ cargo run -- render \
 ```
 
 For offline development, `proton-logicals.example.json` contains a tiny fixture with the same top-level `LogicalServers` shape returned by `/vpn/logicals`.
+
+`fetch-logicals` retries transient Proton API failures. If the endpoint is temporarily unavailable and a cache file exists, PSO writes the cached topology to the requested output path so a short `/vpn/logicals` outage does not erase the last known usable server set. Pass `--no-cache-fallback` when you need strict fresh topology.
 
 Remove `--dry-run` to validate the result with `sing-box check`. Add `--active-config /path/to/config.json --singbox-pid <pid>` to atomically replace the active config and send `SIGHUP`.
 
@@ -89,4 +105,4 @@ If the returned probe IP equals the raw baseline, PSO reports `Leaking`. If both
 
 ## CI
 
-GitHub Actions runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` on pushes and pull requests.
+GitHub Actions runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` on pushes and pull requests. The container job builds `linux/amd64` and `linux/arm64` images with Docker Buildx and publishes to GHCR for non-PR runs. The runtime image is Alpine-based and bundles `sing-box` by copying `/usr/local/bin/sing-box` from `ghcr.io/sagernet/sing-box:latest` into the PSO image.

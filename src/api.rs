@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use reqwest::{Client, Response};
-use serde::{Deserialize, Serialize};
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::time::sleep;
 
 use crate::auth::SrpProof;
 use crate::model::{LogicalServer, ProtonLogicalResponse};
@@ -34,41 +35,27 @@ impl ProtonApiClient {
         request: &CertificateRequest,
     ) -> Result<CertificateResponse> {
         let url = format!("{}/vpn/certificate", self.base_url);
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(access_token)
-            .json(request)
-            .send()
-            .await
-            .context("failed to send Proton certificate request")?
-            .error_for_status()
-            .context("Proton certificate request failed")?;
-
-        response
-            .json::<CertificateResponse>()
-            .await
-            .context("failed to decode Proton certificate response")
+        send_json_with_retry(|| {
+            self.client
+                .post(&url)
+                .bearer_auth(access_token)
+                .json(request)
+        })
+        .await
+        .context("Proton certificate request failed")
     }
 
     pub async fn get_logicals(&self, access_token: &str) -> Result<Vec<LogicalServer>> {
         let url = format!("{}/vpn/logicals", self.base_url);
-        let response = self
-            .client
-            .get(url)
-            .bearer_auth(access_token)
-            .query(&[("WithState", "true"), ("Protocols", "wireguard")])
-            .send()
-            .await
-            .context("failed to send Proton logicals request")?
-            .error_for_status()
-            .context("Proton logicals request failed")?;
-
-        Ok(response
-            .json::<ProtonLogicalResponse>()
-            .await
-            .context("failed to decode Proton logicals response")?
-            .into_servers())
+        Ok(send_json_with_retry::<ProtonLogicalResponse, _>(|| {
+            self.client
+                .get(&url)
+                .bearer_auth(access_token)
+                .query(&[("WithState", "true"), ("Protocols", "wireguard")])
+        })
+        .await
+        .context("Proton logicals request failed")?
+        .into_servers())
     }
 
     pub async fn auth_info(
@@ -80,18 +67,15 @@ impl ProtonApiClient {
         let request = LoginInfoBody {
             username: username.to_string(),
         };
-        let mut builder = self.client.post(url).json(&request);
-        if let Some(token) = human_verification_token {
-            builder = builder.header("X-PM-Human-Verification", token);
-        }
-
-        decode_response(
+        send_json_with_retry(|| {
+            let mut builder = self.client.post(&url).json(&request);
+            if let Some(token) = human_verification_token {
+                builder = builder.header("X-PM-Human-Verification", token);
+            }
             builder
-                .send()
-                .await
-                .context("failed to send auth info request")?,
-        )
+        })
         .await
+        .context("Proton auth info request failed")
     }
 
     pub async fn authenticate(
@@ -110,18 +94,15 @@ impl ProtonApiClient {
             two_factor_code: two_factor_code.map(ToOwned::to_owned),
             srp_modulus_hex: modulus_hex.to_string(),
         };
-        let mut builder = self.client.post(url).json(&request);
-        if let Some(token) = human_verification_token {
-            builder = builder.header("X-PM-Human-Verification", token);
-        }
-
-        decode_response(
+        send_json_with_retry(|| {
+            let mut builder = self.client.post(&url).json(&request);
+            if let Some(token) = human_verification_token {
+                builder = builder.header("X-PM-Human-Verification", token);
+            }
             builder
-                .send()
-                .await
-                .context("failed to send auth request")?,
-        )
+        })
         .await
+        .context("Proton auth request failed")
     }
 
     pub async fn fork_vpn_session(
@@ -136,16 +117,14 @@ impl ProtonApiClient {
             payload,
         };
 
-        decode_response(
+        send_json_with_retry(|| {
             self.client
-                .post(url)
+                .post(&url)
                 .bearer_auth(primary_access_token)
                 .json(&request)
-                .send()
-                .await
-                .context("failed to send VPN session fork request")?,
-        )
+        })
         .await
+        .context("Proton VPN session fork request failed")
     }
 
     pub async fn refresh_session(&self, uid: &str, refresh_token: &str) -> Result<AuthTokens> {
@@ -158,27 +137,61 @@ impl ProtonApiClient {
             redirect_uri: "http://protonvpn.ch".into(),
         };
 
-        decode_response(
-            self.client
-                .post(url)
-                .json(&request)
-                .send()
-                .await
-                .context("failed to send auth refresh request")?,
-        )
-        .await
+        send_json_with_retry(|| self.client.post(&url).json(&request))
+            .await
+            .context("Proton auth refresh request failed")
     }
 }
 
+async fn send_json_with_retry<T, F>(mut build: F) -> Result<T>
+where
+    T: DeserializeOwned,
+    F: FnMut() -> RequestBuilder,
+{
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match build().send().await {
+            Ok(response) if has_human_verification(&response) => {
+                return decode_response(response).await;
+            }
+            Ok(response) if is_retryable(response.status()) && attempt < 2 => {
+                sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+            }
+            Ok(response) => return decode_response(response).await,
+            Err(error) if attempt < 2 => {
+                last_error = Some(error);
+                sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+            }
+            Err(error) => return Err(error).context("failed to send Proton API request"),
+        }
+    }
+
+    Err(last_error.expect("retry loop exits with an error"))
+        .context("failed to send Proton API request")
+}
+
+fn is_retryable(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn has_human_verification(response: &Response) -> bool {
+    matches!(response.status().as_u16(), 422 | 429)
+        && response.headers().contains_key("X-PM-Human-Verification")
+}
+
 async fn decode_response<T: serde::de::DeserializeOwned>(response: Response) -> Result<T> {
-    if matches!(response.status().as_u16(), 422 | 429)
-        && let Some(challenge) = response
+    if has_human_verification(&response) {
+        let challenge = response
             .headers()
             .get("X-PM-Human-Verification")
             .and_then(|value| value.to_str().ok())
-    {
+            .unwrap_or("challenge")
+            .to_string();
+        let body = response.text().await.unwrap_or_default();
         bail!(
-            "human verification required: solve the Proton challenge and retry with X-PM-Human-Verification token ({challenge})"
+            "human verification required: solve the Proton challenge and retry with --human-verification-token ({challenge}). Response body: {body}"
         );
     }
 
