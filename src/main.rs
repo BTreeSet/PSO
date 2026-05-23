@@ -174,8 +174,6 @@ struct LoginArgs {
     #[arg(long)]
     human_verification_token: Option<String>,
     #[arg(long)]
-    fork_payload: Option<String>,
-    #[arg(long)]
     output: Option<PathBuf>,
 }
 
@@ -213,7 +211,6 @@ struct AuthConfig {
     password_file: Option<PathBuf>,
     totp: Option<String>,
     no_prompt: Option<bool>,
-    fork_payload: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -639,12 +636,7 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
             args.human_verification_token.as_deref(),
         )
         .await?;
-    let vpn = api
-        .fork_vpn_session(
-            &primary.access_token,
-            args.fork_payload.or(config.fork_payload.clone()),
-        )
-        .await?;
+    let vpn = api.fork_vpn_session(&primary.access_token, None).await?;
 
     let uid = vpn
         .uid
