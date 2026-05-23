@@ -24,6 +24,14 @@ PSO separates runtime inputs into three categories:
 
 The state directory defaults to `pso-state` for local runs. In containers, mount it on durable storage and set `PSO_STATE_DIR`, for example `/var/lib/pso`.
 
+Global options are passed before the command group:
+
+```bash
+pso --config pso.config.json --state-dir /var/lib/pso <command>
+```
+
+Long-lived settings can be placed in `pso.config.json`, including auth defaults, topology fallback, render sessions, and control-plane paths. See `pso.config.example.json`.
+
 ## Authentication
 
 Run the Proton SRP login flow and fork the primary account session into a VPN-scoped session:
@@ -31,7 +39,7 @@ Run the Proton SRP login flow and fork the primary account session into a VPN-sc
 ```bash
 PSO_STATE_DIR=/var/lib/pso \
 PSO_PROTON_PASSWORD_FILE=/run/secrets/proton_password \
-cargo run -- login \
+cargo run -- auth login \
   --username alice@example.com \
   --totp 123456 \
   --no-prompt
@@ -51,7 +59,7 @@ When Proton requires human verification, PSO prints the challenge details return
 Refresh an existing VPN session without replaying the password flow:
 
 ```bash
-PSO_STATE_DIR=/var/lib/pso cargo run -- refresh-vpn-token \
+PSO_STATE_DIR=/var/lib/pso cargo run -- auth refresh \
   --username alice@example.com \
   --output vpn-session.json
 ```
@@ -63,15 +71,15 @@ Fetch Proton logical server topology and persist a state copy:
 ```bash
 PSO_STATE_DIR=/var/lib/pso \
 PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
-cargo run -- fetch-logicals --output proton-logicals.json
+cargo run -- topology fetch --output proton-logicals.json
 ```
 
-`fetch-logicals` retries transient Proton API failures. On success, it writes both the requested output file and `PSO_STATE_DIR/logicals.json`. If `/vpn/logicals` is temporarily unavailable, PSO can use an explicit operator-provided fallback file:
+`topology fetch` retries transient Proton API failures. On success, it writes both the requested output file and `PSO_STATE_DIR/logicals.json`. If `/vpn/logicals` is temporarily unavailable, PSO can use an explicit operator-provided fallback file:
 
 ```bash
 PSO_STATE_DIR=/var/lib/pso \
 PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
-cargo run -- fetch-logicals \
+cargo run -- topology fetch \
   --output proton-logicals.json \
   --fallback-topology proton-logicals.example.json
 ```
@@ -95,6 +103,12 @@ cargo run -- render \
   --dry-run
 ```
 
+With `render` configured in `pso.config.json`, the command can be reduced to:
+
+```bash
+cargo run -- --config pso.config.json render
+```
+
 Human-readable tier filters are supported: `Free`, `Basic`, `Plus`, and `Visionary`.
 
 Remove `--dry-run` to validate with `sing-box check`. Add `--active-config /path/to/config.json --singbox-pid <pid>` to atomically replace the active config and send SIGHUP.
@@ -111,6 +125,13 @@ PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' cargo run -- control-pla
   --outbound-tag proton-wg
 ```
 
+With `control_plane` configured in `pso.config.json`, pass only the token:
+
+```bash
+PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
+cargo run -- --config pso.config.json control-plane
+```
+
 If `--singbox-pid` is omitted, PSO searches for a `sing-box` process. On every successful certificate response, PSO writes the generated WireGuard outbound atomically and sends SIGHUP. On refresh failure, it schedules the next attempt at the midpoint between now and certificate expiration, with a 30 second minimum delay and a four-attempt limit before rotating local key material.
 
 ## Health Probes
@@ -118,14 +139,15 @@ If `--singbox-pid` is omitted, PSO searches for a `sing-box` process. On every s
 Acquire the raw host IP baseline:
 
 ```bash
-cargo run -- baseline
+cargo run -- health baseline
 ```
 
 Probe once through the default network path or through a proxy exposed by a specific outbound:
 
 ```bash
-cargo run -- probe --raw-ip 198.51.100.1
-cargo run -- probe --raw-ip 198.51.100.1 --proxy-url socks5h://127.0.0.1:1081
+cargo run -- health baseline
+cargo run -- health probe --raw-ip 198.51.100.1
+cargo run -- health probe --raw-ip 198.51.100.1 --proxy-url socks5h://127.0.0.1:1081
 ```
 
 If the returned probe IP equals the raw baseline, PSO reports `Leaking`. If both Cloudflare and ipinfo fail, it reports `Dead`. Any non-baseline IP is treated as `Healthy`.

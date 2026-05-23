@@ -21,6 +21,12 @@ use tracing::info;
 #[derive(Debug, Parser)]
 #[command(name = "pso", about = "Proton-Singbox Orchestrator")]
 struct Cli {
+    #[arg(long, default_value = "pso.config.json")]
+    config: PathBuf,
+    #[arg(long, env = "PSO_STATE_DIR")]
+    state_dir: Option<PathBuf>,
+    #[arg(long, env = "PSO_API_BASE_URL")]
+    api_base_url: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -28,29 +34,62 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Render(RenderArgs),
+    Health(HealthArgs),
+    ControlPlane(ControlPlaneArgs),
+    Auth(AuthArgs),
+    Topology(TopologyArgs),
+}
+
+#[derive(Debug, Args)]
+struct AuthArgs {
+    #[command(subcommand)]
+    command: AuthCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    Login(LoginArgs),
+    Refresh(RefreshVpnTokenArgs),
+}
+
+#[derive(Debug, Args)]
+struct TopologyArgs {
+    #[command(subcommand)]
+    command: TopologyCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TopologyCommand {
+    Fetch(FetchLogicalsArgs),
+}
+
+#[derive(Debug, Args)]
+struct HealthArgs {
+    #[command(subcommand)]
+    command: HealthCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum HealthCommand {
     Baseline,
     Probe(ProbeArgs),
-    ControlPlane(ControlPlaneArgs),
-    FetchLogicals(FetchLogicalsArgs),
-    Login(LoginArgs),
-    RefreshVpnToken(RefreshVpnTokenArgs),
 }
 
 #[derive(Debug, Args)]
 struct RenderArgs {
-    #[arg(long, default_value = "config.template.json")]
-    template: PathBuf,
-    #[arg(long, default_value = "proton-logicals.json")]
-    topology: PathBuf,
-    #[arg(long, default_value = "rendered.config.json.tmp")]
-    output: PathBuf,
+    #[arg(long)]
+    template: Option<PathBuf>,
+    #[arg(long)]
+    topology: Option<PathBuf>,
+    #[arg(long)]
+    output: Option<PathBuf>,
     #[arg(long)]
     active_config: Option<PathBuf>,
     #[arg(long)]
     singbox_pid: Option<i32>,
-    #[arg(long, default_value = "sing-box")]
-    singbox_bin: PathBuf,
-    #[arg(long = "session", value_parser = parse_session, required = true)]
+    #[arg(long)]
+    singbox_bin: Option<PathBuf>,
+    #[arg(long = "session", value_parser = parse_session)]
     sessions: Vec<(String, String)>,
     #[arg(long)]
     dry_run: bool,
@@ -74,16 +113,14 @@ struct ProbeArgs {
 struct ControlPlaneArgs {
     #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
     access_token: String,
-    #[arg(long, default_value = "https://api.protonvpn.ch")]
-    api_base_url: String,
     #[arg(long)]
-    active_config: PathBuf,
+    active_config: Option<PathBuf>,
     #[arg(long)]
     singbox_pid: Option<i32>,
-    #[arg(long, default_value = "proton-wg")]
-    outbound_tag: String,
     #[arg(long)]
-    endpoint: String,
+    outbound_tag: Option<String>,
+    #[arg(long)]
+    endpoint: Option<String>,
     #[arg(long)]
     peer_public_key: Option<String>,
 }
@@ -92,12 +129,8 @@ struct ControlPlaneArgs {
 struct FetchLogicalsArgs {
     #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
     access_token: String,
-    #[arg(long, default_value = "https://api.protonvpn.ch")]
-    api_base_url: String,
     #[arg(long, default_value = "proton-logicals.json")]
     output: PathBuf,
-    #[arg(long, env = "PSO_STATE_DIR", default_value = "pso-state")]
-    state_dir: PathBuf,
     #[arg(long)]
     fallback_topology: Option<PathBuf>,
     #[arg(long)]
@@ -107,7 +140,7 @@ struct FetchLogicalsArgs {
 #[derive(Debug, Args)]
 struct LoginArgs {
     #[arg(long)]
-    username: String,
+    username: Option<String>,
     #[arg(long, env = "PSO_PROTON_PASSWORD")]
     password: Option<String>,
     #[arg(long, env = "PSO_PROTON_PASSWORD_FILE")]
@@ -122,26 +155,82 @@ struct LoginArgs {
     totp: Option<String>,
     #[arg(long)]
     human_verification_token: Option<String>,
-    #[arg(long, default_value = "https://api.protonvpn.ch")]
-    api_base_url: String,
     #[arg(long)]
     fork_payload: Option<String>,
     #[arg(long)]
     output: Option<PathBuf>,
-    #[arg(long, env = "PSO_STATE_DIR", default_value = "pso-state")]
-    state_dir: PathBuf,
 }
 
 #[derive(Debug, Args)]
 struct RefreshVpnTokenArgs {
     #[arg(long)]
-    username: String,
-    #[arg(long, default_value = "https://api.protonvpn.ch")]
-    api_base_url: String,
+    username: Option<String>,
     #[arg(long)]
     output: Option<PathBuf>,
-    #[arg(long, env = "PSO_STATE_DIR", default_value = "pso-state")]
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeContext {
+    api_base_url: String,
     state_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct AppConfig {
+    api_base_url: Option<String>,
+    state_dir: Option<PathBuf>,
+    auth: AuthConfig,
+    topology: TopologyConfig,
+    render: RenderConfig,
+    control_plane: ControlPlaneDefaults,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct AuthConfig {
+    username: Option<String>,
+    password: Option<String>,
+    password_file: Option<PathBuf>,
+    totp: Option<String>,
+    no_prompt: Option<bool>,
+    fork_payload: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct TopologyConfig {
+    fallback_topology: Option<PathBuf>,
+    require_live: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct RenderConfig {
+    template: Option<PathBuf>,
+    topology: Option<PathBuf>,
+    output: Option<PathBuf>,
+    active_config: Option<PathBuf>,
+    singbox_pid: Option<i32>,
+    singbox_bin: Option<PathBuf>,
+    sessions: Vec<SessionEntry>,
+    dry_run: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SessionEntry {
+    username: String,
+    tier: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct ControlPlaneDefaults {
+    active_config: Option<PathBuf>,
+    singbox_pid: Option<i32>,
+    outbound_tag: Option<String>,
+    endpoint: Option<String>,
+    peer_public_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -157,26 +246,65 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let config = read_optional_config(&cli.config)?;
+    let context = RuntimeContext {
+        api_base_url: cli
+            .api_base_url
+            .or(config.api_base_url.clone())
+            .unwrap_or_else(|| "https://api.protonvpn.ch".to_string()),
+        state_dir: cli
+            .state_dir
+            .or(config.state_dir.clone())
+            .unwrap_or_else(|| PathBuf::from("pso-state")),
+    };
+
     match cli.command {
-        Command::Render(args) => render(args).await,
-        Command::Baseline => {
-            let ip = HealthMonitor::acquire_baseline().await?;
-            println!("{ip}");
-            Ok(())
-        }
-        Command::Probe(args) => probe(args).await,
-        Command::ControlPlane(args) => control_plane(args).await,
-        Command::FetchLogicals(args) => fetch_logicals(args).await,
-        Command::Login(args) => login(args).await,
-        Command::RefreshVpnToken(args) => refresh_vpn_token(args).await,
+        Command::Render(args) => render(&config.render, args).await,
+        Command::Health(args) => match args.command {
+            HealthCommand::Baseline => {
+                let ip = HealthMonitor::acquire_baseline().await?;
+                println!("{ip}");
+                Ok(())
+            }
+            HealthCommand::Probe(args) => probe(args).await,
+        },
+        Command::ControlPlane(args) => control_plane(&context, &config.control_plane, args).await,
+        Command::Auth(args) => match args.command {
+            AuthCommand::Login(args) => login(&context, &config.auth, args).await,
+            AuthCommand::Refresh(args) => refresh_vpn_token(&context, &config.auth, args).await,
+        },
+        Command::Topology(args) => match args.command {
+            TopologyCommand::Fetch(args) => fetch_logicals(&context, &config.topology, args).await,
+        },
     }
 }
 
-async fn render(args: RenderArgs) -> Result<()> {
-    let template: Value = read_json(&args.template)?;
-    let topology_response: ProtonLogicalResponse = read_json(&args.topology)?;
+async fn render(config: &RenderConfig, args: RenderArgs) -> Result<()> {
+    let template_path = args
+        .template
+        .or(config.template.clone())
+        .unwrap_or_else(|| PathBuf::from("config.template.json"));
+    let topology_path = args
+        .topology
+        .or(config.topology.clone())
+        .unwrap_or_else(|| PathBuf::from("proton-logicals.json"));
+    let output_path = args
+        .output
+        .or(config.output.clone())
+        .unwrap_or_else(|| PathBuf::from("rendered.config.json.tmp"));
+    let active_config = args.active_config.or(config.active_config.clone());
+    let singbox_pid = args.singbox_pid.or(config.singbox_pid);
+    let singbox_bin = args
+        .singbox_bin
+        .or(config.singbox_bin.clone())
+        .unwrap_or_else(|| PathBuf::from("sing-box"));
+    let resolved_sessions = resolve_sessions(args.sessions, &config.sessions)?;
+    let dry_run = args.dry_run || config.dry_run.unwrap_or(false);
+
+    let template: Value = read_json(&template_path)?;
+    let topology_response: ProtonLogicalResponse = read_json(&topology_path)?;
     let sessions = SessionStore::new();
-    for (username, tier) in args.sessions {
+    for (username, tier) in resolved_sessions {
         sessions.insert(UserSession::new(username, tier));
     }
 
@@ -188,19 +316,19 @@ async fn render(args: RenderArgs) -> Result<()> {
         &provisioner,
     )?;
     let rendered_text = serde_json::to_string_pretty(&rendered)?;
-    fs::write(&args.output, rendered_text)
-        .with_context(|| format!("failed to write {}", args.output.display()))?;
-    info!(path = %args.output.display(), "rendered hydrated sing-box config");
+    fs::write(&output_path, rendered_text)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    info!(path = %output_path.display(), "rendered hydrated sing-box config");
 
-    if args.dry_run {
+    if dry_run {
         return Ok(());
     }
 
-    validate_singbox_config(&args.singbox_bin, &args.output).await?;
-    if let (Some(active_config), Some(singbox_pid)) = (args.active_config, args.singbox_pid) {
+    validate_singbox_config(&singbox_bin, &output_path).await?;
+    if let (Some(active_config), Some(singbox_pid)) = (active_config, singbox_pid) {
         deploy_with_sighup(&DeployPlan {
-            singbox_bin: args.singbox_bin,
-            rendered_tmp: args.output,
+            singbox_bin,
+            rendered_tmp: output_path,
             active_config,
             singbox_pid,
         })
@@ -226,30 +354,45 @@ async fn probe(args: ProbeArgs) -> Result<()> {
     }
 }
 
-async fn control_plane(args: ControlPlaneArgs) -> Result<()> {
-    let singbox_pid = match args.singbox_pid {
+async fn control_plane(
+    context: &RuntimeContext,
+    config: &ControlPlaneDefaults,
+    args: ControlPlaneArgs,
+) -> Result<()> {
+    let singbox_pid = match args.singbox_pid.or(config.singbox_pid) {
         Some(pid) => pid,
         None => find_process_pid("sing-box").context("sing-box process was not found")?,
     };
-    let api = ProtonApiClient::new(args.api_base_url)?;
+    let active_config = args
+        .active_config
+        .or(config.active_config.clone())
+        .context("active config path is required; pass --active-config or set control_plane.active_config")?;
+    let endpoint = args
+        .endpoint
+        .or(config.endpoint.clone())
+        .context("endpoint is required; pass --endpoint or set control_plane.endpoint")?;
+    let api = ProtonApiClient::new(&context.api_base_url)?;
     let control_plane = ControlPlane::new(api);
     control_plane
         .run_refresh_loop(ControlPlaneConfig {
             access_token: args.access_token,
-            active_config: args.active_config,
+            active_config,
             singbox_pid,
-            outbound_tag: args.outbound_tag,
+            outbound_tag: args
+                .outbound_tag
+                .or(config.outbound_tag.clone())
+                .unwrap_or_else(|| "proton-wg".to_string()),
             selected_server: PhysicalServer {
                 id: String::new(),
                 name: String::new(),
-                entry_ip: Some(args.endpoint),
+                entry_ip: Some(endpoint),
                 entry_ipv6: None,
                 exit_ip: None,
                 domain: None,
                 label: None,
                 status: 1,
                 load: None,
-                public_key: args.peer_public_key,
+                public_key: args.peer_public_key.or(config.peer_public_key.clone()),
                 generation: None,
                 services_down: Some(0),
                 services_down_reason: None,
@@ -258,9 +401,18 @@ async fn control_plane(args: ControlPlaneArgs) -> Result<()> {
         .await
 }
 
-async fn fetch_logicals(args: FetchLogicalsArgs) -> Result<()> {
-    let api = ProtonApiClient::new(args.api_base_url)?;
-    let state_logicals = args.state_dir.join("logicals.json");
+async fn fetch_logicals(
+    context: &RuntimeContext,
+    config: &TopologyConfig,
+    args: FetchLogicalsArgs,
+) -> Result<()> {
+    let api = ProtonApiClient::new(&context.api_base_url)?;
+    let state_logicals = context.state_dir.join("logicals.json");
+    let fallback_topology = args
+        .fallback_topology
+        .as_ref()
+        .or(config.fallback_topology.as_ref());
+    let require_live = args.require_live || config.require_live.unwrap_or(false);
     match api.get_logicals(&args.access_token).await {
         Ok(logicals) => {
             let value = serde_json::json!({ "LogicalServers": logicals });
@@ -269,11 +421,11 @@ async fn fetch_logicals(args: FetchLogicalsArgs) -> Result<()> {
                 .with_context(|| format!("failed to write {}", args.output.display()))?;
             write_state_file(&state_logicals, &text)?;
         }
-        Err(error) if args.require_live => return Err(error),
+        Err(error) if require_live => return Err(error),
         Err(error) => write_logicals_from_available_state(
             &args.output,
             &state_logicals,
-            args.fallback_topology.as_ref(),
+            fallback_topology,
             error,
         )?,
     }
@@ -314,44 +466,51 @@ fn write_logicals_from_available_state(
         .with_context(|| format!("failed to write {}", output.display()))
 }
 
-async fn login(args: LoginArgs) -> Result<()> {
-    let password = match args.password {
+async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -> Result<()> {
+    let username = args
+        .username
+        .or(config.username.clone())
+        .context("username is required; pass --username or set auth.username in config")?;
+    let password = match args.password.or(config.password.clone()) {
         Some(password) => password,
-        None => match args.password_file {
+        None => match args.password_file.or(config.password_file.clone()) {
             Some(path) => fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?
                 .trim_end_matches(['\r', '\n'])
                 .to_string(),
-            None if !args.no_prompt => rpassword::prompt_password("Proton password: ")?,
+            None if !(args.no_prompt || config.no_prompt.unwrap_or(false)) => {
+                rpassword::prompt_password("Proton password: ")?
+            }
             None => anyhow::bail!(
                 "password is required; pass --password, PSO_PROTON_PASSWORD, --password-file, or PSO_PROTON_PASSWORD_FILE"
             ),
         },
     };
 
-    let api = ProtonApiClient::new(args.api_base_url)?;
+    let api = ProtonApiClient::new(&context.api_base_url)?;
     let info = api
-        .auth_info(&args.username, args.human_verification_token.as_deref())
+        .auth_info(&username, args.human_verification_token.as_deref())
         .await?;
     if info.version != 4 {
         anyhow::bail!("unsupported Proton SRP auth version {}", info.version);
     }
 
-    let two_factor_input =
-        if info.two_factor.unwrap_or(0) > 0 && args.totp.is_none() && !args.no_prompt {
-            Some(rpassword::prompt_password("Proton TOTP: ")?)
-        } else if info.two_factor.unwrap_or(0) > 0 && args.totp.is_none() {
-            anyhow::bail!("TOTP is required for this account; pass --totp or PSO_PROTON_TOTP")
-        } else {
-            args.totp
-        };
+    let totp_arg = args.totp.or(config.totp.clone());
+    let no_prompt = args.no_prompt || config.no_prompt.unwrap_or(false);
+    let two_factor_input = if info.two_factor.unwrap_or(0) > 0 && totp_arg.is_none() && !no_prompt {
+        Some(rpassword::prompt_password("Proton TOTP: ")?)
+    } else if info.two_factor.unwrap_or(0) > 0 && totp_arg.is_none() {
+        anyhow::bail!("TOTP is required for this account; pass --totp or PSO_PROTON_TOTP")
+    } else {
+        totp_arg
+    };
     let totp = two_factor_input
         .as_deref()
         .map(resolve_two_factor_code)
         .transpose()?;
 
     let proof = calculate_srp_proof(
-        &args.username,
+        &username,
         &password,
         &info.salt,
         &info.modulus,
@@ -359,7 +518,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     )?;
     let primary = api
         .authenticate(
-            &args.username,
+            &username,
             &proof,
             &info.modulus,
             totp.as_deref(),
@@ -367,7 +526,10 @@ async fn login(args: LoginArgs) -> Result<()> {
         )
         .await?;
     let vpn = api
-        .fork_vpn_session(&primary.access_token, args.fork_payload)
+        .fork_vpn_session(
+            &primary.access_token,
+            args.fork_payload.or(config.fork_payload.clone()),
+        )
         .await?;
 
     let uid = vpn
@@ -378,7 +540,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     store_vpn_session_state(
         &uid,
         &vpn.refresh_token,
-        &args.state_dir.join("vpn-session.json"),
+        &context.state_dir.join("vpn-session.json"),
     )?;
 
     if let Some(output) = args.output {
@@ -391,10 +553,18 @@ async fn login(args: LoginArgs) -> Result<()> {
     Ok(())
 }
 
-async fn refresh_vpn_token(args: RefreshVpnTokenArgs) -> Result<()> {
-    let session_state = args.state_dir.join("vpn-session.json");
+async fn refresh_vpn_token(
+    context: &RuntimeContext,
+    config: &AuthConfig,
+    args: RefreshVpnTokenArgs,
+) -> Result<()> {
+    let _username = args
+        .username
+        .or(config.username.clone())
+        .context("username is required; pass --username or set auth.username in config")?;
+    let session_state = context.state_dir.join("vpn-session.json");
     let state = load_vpn_session_state(&session_state)?;
-    let api = ProtonApiClient::new(args.api_base_url)?;
+    let api = ProtonApiClient::new(&context.api_base_url)?;
     let refreshed = api
         .refresh_session(&state.uid, &state.refresh_token)
         .await?;
@@ -426,6 +596,13 @@ fn load_vpn_session_state(state_file: &PathBuf) -> Result<VpnSessionState> {
     serde_json::from_str(&state).context("failed to decode VPN session state")
 }
 
+fn read_optional_config(path: &PathBuf) -> Result<AppConfig> {
+    if !path.exists() {
+        return Ok(AppConfig::default());
+    }
+    read_json(path)
+}
+
 fn write_state_file(path: &PathBuf, text: &str) -> Result<()> {
     if let Some(parent) = path
         .parent()
@@ -435,6 +612,25 @@ fn write_state_file(path: &PathBuf, text: &str) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn resolve_sessions(
+    cli_sessions: Vec<(String, String)>,
+    config_sessions: &[SessionEntry],
+) -> Result<Vec<(String, String)>> {
+    if !cli_sessions.is_empty() {
+        return Ok(cli_sessions);
+    }
+    let sessions: Vec<_> = config_sessions
+        .iter()
+        .map(|session| (session.username.clone(), session.tier.clone()))
+        .collect();
+    if sessions.is_empty() {
+        anyhow::bail!(
+            "at least one render session is required; pass --session username:tier or set render.sessions in config"
+        )
+    }
+    Ok(sessions)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
