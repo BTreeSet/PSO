@@ -10,13 +10,40 @@ PSO is a Rust control-plane scaffold for hydrating `sing-box` WireGuard outbound
 
 ## Current State
 
-This repository is a runnable foundation. The renderer accepts a local Proton logical topology JSON file and generates WireGuard key material locally for every hydrated outbound. The private key is never supplied by the user and is never sent to Proton. The `control-plane` command owns the live certificate refresh lifecycle by sending locally generated public keys to `/vpn/certificate`, atomically writing a sing-box config, and signaling sing-box with `SIGHUP`.
+This repository is a runnable foundation. PSO can fetch Proton logical topology from `/vpn/logicals`, perform SRP-based login, fork a VPN-scoped session, and cache the VPN refresh token in the OS keyring. The renderer generates WireGuard key material locally for every hydrated outbound. The private key is never supplied by the user and is never sent to Proton. The `control-plane` command owns the live certificate refresh lifecycle by sending locally generated public keys to `/vpn/certificate`, atomically writing a sing-box config, and signaling sing-box with `SIGHUP`.
+
+## Login and Session Fork
+
+Run the Proton SRP login flow and fork the primary account session into a VPN-scoped session:
+
+```bash
+cargo run -- login \
+  --username alice@example.com \
+  --totp 123456
+```
+
+If `--password` is omitted, PSO prompts without echoing input. If Proton reports that two-factor authentication is enabled and `--totp` is omitted, PSO prompts for the TOTP code. The command stores the VPN refresh token in the OS keyring under the username and prints the current VPN-scoped token response to stdout unless `--output vpn-session.json` is supplied.
+
+When Proton requires human verification, PSO returns the verification challenge details. Complete the challenge in a browser, then rerun the failed command with:
+
+```bash
+cargo run -- login \
+  --username alice@example.com \
+  --human-verification-token replace-with-token
+```
+
+On later boots, refresh the cached VPN session without replaying the password flow:
+
+```bash
+cargo run -- refresh-vpn-token --username alice@example.com
+```
 
 ## Render a Config
 
 ```bash
 cp config.template.example.json config.template.json
-PSO_PROTON_ACCESS_TOKEN='replace-with-access-token' cargo run -- fetch-logicals \
+cargo run -- refresh-vpn-token --username alice@example.com --output vpn-session.json
+PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' cargo run -- fetch-logicals \
   --output proton-logicals.json
 cargo run -- render \
   --template config.template.json \

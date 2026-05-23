@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use pso::api::ProtonApiClient;
+use pso::auth::calculate_srp_proof;
 use pso::control_plane::{ControlPlane, ControlPlaneConfig};
 use pso::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use pso::health::HealthMonitor;
@@ -13,6 +14,7 @@ use pso::process::find_process_pid;
 use pso::provisioning::LocalKeyProvisioner;
 use pso::session::{SessionStore, UserSession};
 use pso::template::hydrate_template;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::info;
 
@@ -30,6 +32,8 @@ enum Command {
     Probe(ProbeArgs),
     ControlPlane(ControlPlaneArgs),
     FetchLogicals(FetchLogicalsArgs),
+    Login(LoginArgs),
+    RefreshVpnToken(RefreshVpnTokenArgs),
 }
 
 #[derive(Debug, Args)]
@@ -94,6 +98,42 @@ struct FetchLogicalsArgs {
     output: PathBuf,
 }
 
+#[derive(Debug, Args)]
+struct LoginArgs {
+    #[arg(long)]
+    username: String,
+    #[arg(long, env = "PSO_PROTON_PASSWORD")]
+    password: Option<String>,
+    #[arg(long, env = "PSO_PROTON_TOTP")]
+    totp: Option<String>,
+    #[arg(long)]
+    human_verification_token: Option<String>,
+    #[arg(long, default_value = "https://api.protonvpn.ch")]
+    api_base_url: String,
+    #[arg(long)]
+    fork_payload: Option<String>,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    no_keyring: bool,
+}
+
+#[derive(Debug, Args)]
+struct RefreshVpnTokenArgs {
+    #[arg(long)]
+    username: String,
+    #[arg(long, default_value = "https://api.protonvpn.ch")]
+    api_base_url: String,
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CachedVpnSession {
+    uid: String,
+    refresh_token: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -111,6 +151,8 @@ async fn main() -> Result<()> {
         Command::Probe(args) => probe(args).await,
         Command::ControlPlane(args) => control_plane(args).await,
         Command::FetchLogicals(args) => fetch_logicals(args).await,
+        Command::Login(args) => login(args).await,
+        Command::RefreshVpnToken(args) => refresh_vpn_token(args).await,
     }
 }
 
@@ -207,6 +249,103 @@ async fn fetch_logicals(args: FetchLogicalsArgs) -> Result<()> {
     fs::write(&args.output, serde_json::to_string_pretty(&value)?)
         .with_context(|| format!("failed to write {}", args.output.display()))?;
     Ok(())
+}
+
+async fn login(args: LoginArgs) -> Result<()> {
+    let password = match args.password {
+        Some(password) => password,
+        None => rpassword::prompt_password("Proton password: ")?,
+    };
+
+    let api = ProtonApiClient::new(args.api_base_url)?;
+    let info = api
+        .auth_info(&args.username, args.human_verification_token.as_deref())
+        .await?;
+    if info.version != 4 {
+        anyhow::bail!("unsupported Proton SRP auth version {}", info.version);
+    }
+
+    let totp = if info.two_factor.unwrap_or(0) > 0 && args.totp.is_none() {
+        Some(rpassword::prompt_password("Proton TOTP: ")?)
+    } else {
+        args.totp
+    };
+
+    let proof = calculate_srp_proof(
+        &args.username,
+        &password,
+        &info.salt,
+        &info.modulus,
+        &info.server_ephemeral,
+    )?;
+    let primary = api
+        .authenticate(
+            &args.username,
+            &proof,
+            &info.modulus,
+            totp.as_deref(),
+            args.human_verification_token.as_deref(),
+        )
+        .await?;
+    let vpn = api
+        .fork_vpn_session(&primary.access_token, args.fork_payload)
+        .await?;
+
+    if !args.no_keyring {
+        let uid = vpn
+            .uid
+            .clone()
+            .or(primary.uid.clone())
+            .context("Proton login response did not include UID for refresh cache")?;
+        store_cached_vpn_session(&args.username, &uid, &vpn.refresh_token)?;
+    }
+
+    if let Some(output) = args.output {
+        fs::write(&output, serde_json::to_string_pretty(&vpn)?)
+            .with_context(|| format!("failed to write {}", output.display()))?;
+    } else {
+        println!("{}", serde_json::to_string_pretty(&vpn)?);
+    }
+
+    Ok(())
+}
+
+async fn refresh_vpn_token(args: RefreshVpnTokenArgs) -> Result<()> {
+    let cached = load_cached_vpn_session(&args.username)?;
+    let api = ProtonApiClient::new(args.api_base_url)?;
+    let refreshed = api
+        .refresh_session(&cached.uid, &cached.refresh_token)
+        .await?;
+    let uid = refreshed.uid.as_deref().unwrap_or(&cached.uid);
+    store_cached_vpn_session(&args.username, uid, &refreshed.refresh_token)?;
+
+    if let Some(output) = args.output {
+        fs::write(&output, serde_json::to_string_pretty(&refreshed)?)
+            .with_context(|| format!("failed to write {}", output.display()))?;
+    } else {
+        println!("{}", serde_json::to_string_pretty(&refreshed)?);
+    }
+
+    Ok(())
+}
+
+fn store_cached_vpn_session(username: &str, uid: &str, refresh_token: &str) -> Result<()> {
+    let entry = keyring::Entry::new("pso-vpn-session", username)?;
+    let cached = CachedVpnSession {
+        uid: uid.to_string(),
+        refresh_token: refresh_token.to_string(),
+    };
+    entry
+        .set_password(&serde_json::to_string(&cached)?)
+        .context("failed to store VPN refresh token in OS keyring")
+}
+
+fn load_cached_vpn_session(username: &str) -> Result<CachedVpnSession> {
+    let entry = keyring::Entry::new("pso-vpn-session", username)?;
+    let cached = entry
+        .get_password()
+        .context("failed to load VPN refresh token from OS keyring")?;
+    serde_json::from_str(&cached).context("failed to decode cached VPN session")
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
