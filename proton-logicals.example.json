@@ -1,45 +1,45 @@
 {
-    "LogicalServers": [
+  "LogicalServers": [
+    {
+      "ID": "nl-plus-1",
+      "Name": "NL#42",
+      "ExitCountry": "NL",
+      "City": "Amsterdam",
+      "Tier": 2,
+      "Features": 4,
+      "Load": 35,
+      "Score": 1.7,
+      "Status": 1,
+      "Servers": [
         {
-            "ID": "nl-plus-1",
-            "Name": "NL#42",
-            "ExitCountry": "NL",
-            "City": "Amsterdam",
-            "Tier": 2,
-            "Features": 4,
-            "Load": 35,
-            "Score": 1.7,
-            "Status": 1,
-            "Servers": [
-                {
-                    "ID": "nl-physical-1",
-                    "Name": "nl-physical-1",
-                    "EntryIP": "203.0.113.10",
-                    "X25519PublicKey": "replace-with-peer-public-key",
-                    "Status": 1,
-                    "Load": 35
-                }
-            ]
-        },
-        {
-            "ID": "jp-free-1",
-            "Name": "JP-FREE#1",
-            "ExitCountry": "JP",
-            "Tier": 0,
-            "Features": 0,
-            "Load": 20,
-            "Score": 2.1,
-            "Status": 1,
-            "Servers": [
-                {
-                    "ID": "jp-physical-1",
-                    "Name": "jp-physical-1",
-                    "EntryIP": "198.51.100.20",
-                    "X25519PublicKey": "replace-with-peer-public-key",
-                    "Status": 1,
-                    "Load": 20
-                }
-            ]
+          "ID": "nl-physical-1",
+          "Name": "nl-physical-1",
+          "EntryIP": "203.0.113.10",
+          "X25519PublicKey": "replace-with-peer-public-key",
+          "Status": 1,
+          "Load": 35
         }
-    ]
+      ]
+    },
+    {
+      "ID": "jp-free-1",
+      "Name": "JP-FREE#1",
+      "ExitCountry": "JP",
+      "Tier": 0,
+      "Features": 0,
+      "Load": 20,
+      "Score": 2.1,
+      "Status": 1,
+      "Servers": [
+        {
+          "ID": "jp-physical-1",
+          "Name": "jp-physical-1",
+          "EntryIP": "198.51.100.20",
+          "X25519PublicKey": "replace-with-peer-public-key",
+          "Status": 1,
+          "Load": 20
+        }
+      ]
+    }
+  ]
 }

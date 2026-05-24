@@ -1,78 +1,78 @@
 {
-    "api_base_url": "https://api.protonvpn.ch",
-    "state_dir": "/var/lib/pso",
-    "providers": {
-        "wireguard": [
-            {
-                "name": "mullvad",
-                "source": {
-                    "type": "mullvad_api"
-                },
-                "default_port": 51820,
-                "local_address": [
-                    "10.64.10.2/32",
-                    "fc00:bbbb:bbbb:bb01::2/128"
-                ],
-                "allowed_ips": [
-                    "0.0.0.0/0",
-                    "::/0"
-                ],
-                "persistent_keepalive_interval": 25
-            },
-            {
-                "name": "custom",
-                "default_port": 51820,
-                "servers": [
-                    {
-                        "id": "custom-wg-001",
-                        "name": "Custom WireGuard 001",
-                        "country": "US",
-                        "endpoint": "vpn.example.net:51820",
-                        "public_key": "replace-with-provider-peer-public-key",
-                        "local_address": [
-                            "10.10.0.2/32"
-                        ]
-                    }
-                ]
-            }
-        ]
-    },
-    "auth": {
-        "proton": {
-            "accounts": [
-                {
-                    "name": "alice-plus",
-                    "username": "alice@example.com",
-                    "tier": "Plus",
-                    "password": "replace-with-protonvpn-password",
-                    "totp": "BASE32TOTPSECRET",
-                    "no_prompt": true
-                },
-                {
-                    "name": "bob-free-jp",
-                    "username": "bob_free_tier@example.com",
-                    "tier": "Free",
-                    "password_file": "/run/secrets/pso-bob-password",
-                    "no_prompt": true
-                }
+  "api_base_url": "https://api.protonvpn.ch",
+  "state_dir": "/var/lib/pso",
+  "providers": {
+    "wireguard": [
+      {
+        "name": "mullvad",
+        "source": {
+          "type": "mullvad_api"
+        },
+        "default_port": 51820,
+        "local_address": [
+          "10.64.10.2/32",
+          "fc00:bbbb:bbbb:bb01::2/128"
+        ],
+        "allowed_ips": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "persistent_keepalive_interval": 25
+      },
+      {
+        "name": "custom",
+        "default_port": 51820,
+        "servers": [
+          {
+            "id": "custom-wg-001",
+            "name": "Custom WireGuard 001",
+            "country": "US",
+            "endpoint": "vpn.example.net:51820",
+            "public_key": "replace-with-provider-peer-public-key",
+            "local_address": [
+              "10.10.0.2/32"
             ]
+          }
+        ]
+      }
+    ]
+  },
+  "auth": {
+    "proton": {
+      "accounts": [
+        {
+          "name": "alice-plus",
+          "username": "alice@example.com",
+          "tier": "Plus",
+          "password": "replace-with-protonvpn-password",
+          "totp": "BASE32TOTPSECRET",
+          "no_prompt": true
+        },
+        {
+          "name": "bob-free-jp",
+          "username": "bob_free_tier@example.com",
+          "tier": "Free",
+          "password_file": "/run/secrets/pso-bob-password",
+          "no_prompt": true
         }
-    },
-    "topology": {
-        "account": "alice-plus",
-        "fallback_topology": "proton-logicals.example.json",
-        "require_live": false
-    },
-    "render": {
-        "template": "config.template.json",
-        "topology": "proton-logicals.json",
-        "output": "rendered.config.json.tmp",
-        "active_config": "/etc/sing-box/config.json",
-        "singbox_bin": "sing-box",
-        "dry_run": false
-    },
-    "run": {
-        "proxy_url": "socks5h://127.0.0.1:1081",
-        "interval_secs": 300
+      ]
     }
+  },
+  "topology": {
+    "account": "alice-plus",
+    "fallback_topology": "proton-logicals.example.json",
+    "require_live": false
+  },
+  "render": {
+    "template": "config.template.json",
+    "topology": "proton-logicals.json",
+    "output": "rendered.config.json.tmp",
+    "active_config": "/etc/sing-box/config.json",
+    "singbox_bin": "sing-box",
+    "dry_run": false
+  },
+  "run": {
+    "proxy_url": "socks5h://127.0.0.1:1081",
+    "interval_secs": 300
+  }
 }
