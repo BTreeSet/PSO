@@ -20,6 +20,7 @@ use crate::provider::{
     PROTON_PROVIDER, ProvidersConfig, WireGuardEndpointOverrides, WireGuardServerFilter,
     resolve_wireguard_endpoint, select_wireguard_server,
 };
+use crate::provider_discovery::resolve_wireguard_provider_catalog;
 use crate::session::UserSession;
 use crate::singbox_adapter::default_allowed_ips;
 use crate::state::{
@@ -340,7 +341,8 @@ async fn process_static_wireguard_endpoint(
     spec: &StaticWireGuardEndpointSpec,
     force_refresh: bool,
 ) -> Result<bool> {
-    let state_changed = ensure_static_wireguard_endpoint_state(runtime, spec, force_refresh)?;
+    let state_changed =
+        ensure_static_wireguard_endpoint_state(runtime, spec, force_refresh).await?;
     if state_changed || !rendered_output_path(&runtime.context, &runtime.render).exists() {
         return Ok(true);
     }
@@ -364,10 +366,10 @@ async fn process_static_wireguard_endpoint(
         "health_reselection_requested",
         Some(&details),
     )?;
-    ensure_static_wireguard_endpoint_state(runtime, spec, true)
+    ensure_static_wireguard_endpoint_state(runtime, spec, true).await
 }
 
-fn ensure_static_wireguard_endpoint_state(
+async fn ensure_static_wireguard_endpoint_state(
     runtime: &SupervisorRuntime,
     spec: &StaticWireGuardEndpointSpec,
     force_reselect: bool,
@@ -381,14 +383,15 @@ fn ensure_static_wireguard_endpoint_state(
                 spec.tag, spec.provider
             )
         })?;
+    let provider = resolve_wireguard_provider_catalog(provider).await?;
     let store = StateStore::open(&runtime.context)?;
     let current = store.load_wireguard_endpoint_state(&spec.tag)?;
     let avoid_server_id = force_reselect
         .then(|| current.as_ref().map(|state| state.server_id.as_str()))
         .flatten();
-    let selected = select_wireguard_server(provider, &spec.filter, avoid_server_id)?;
+    let selected = select_wireguard_server(&provider, &spec.filter, avoid_server_id)?;
     let resolved = resolve_wireguard_endpoint(
-        provider,
+        &provider,
         &selected,
         &WireGuardEndpointOverrides {
             local_address: spec.local_address.clone(),

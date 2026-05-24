@@ -51,15 +51,11 @@
             },
             "filter": {
                 "country": [
-                    "SE"
+                    "Sweden"
                 ],
                 "city": "Stockholm",
-                "features": [
-                    "p2p"
-                ],
-                "max_load": 75,
                 "status": 1,
-                "sort_by": "load_asc"
+                "sort_by": "name_asc"
             }
         }
     ]

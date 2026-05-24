@@ -1,8 +1,9 @@
 # Provider Model
 
-PSO is a WireGuard-first `sing-box` orchestrator. Provider support is split into two modes:
+PSO is a WireGuard-first `sing-box` orchestrator. Provider support is split into three modes:
 
 - `dynamic-api`: PSO talks to a provider API, owns refresh state, and updates endpoint state automatically. Proton is implemented in this mode.
+- `dynamic-catalog`: PSO fetches a public WireGuard server catalog, selects servers, generates and persists local WireGuard keys, records health, and refreshes metadata during `render` and `run`. Mullvad, IVPN, and Surfshark are implemented in this mode.
 - `static-wireguard-catalog`: the operator supplies provider-issued WireGuard endpoint metadata in `pso.config.json`; PSO selects servers, generates and persists local WireGuard keys, renders sing-box endpoints, records health, and can reselect among configured servers.
 
 This keeps provider-specific secrets and long-lived runtime data out of templates while allowing WireGuard-capable providers to be modeled without adding OpenVPN-era compatibility code.
@@ -23,18 +24,18 @@ The WireGuard-capable provider surface tracked from Gluetun research is:
 | Proton | dynamic API | Native SRP login, VPN session refresh, topology fetch, certificate registration, local key generation. |
 | AirVPN | static catalog | Declare endpoint, non-default WireGuard port, peer public key, assigned address, and filters. |
 | FastestVPN | static catalog | Declare provider-issued WireGuard endpoint metadata. |
-| IVPN | static catalog | Declare alternate WireGuard ports where needed. |
-| Mullvad | static catalog | Supports WireGuard peer `reserved` bytes. |
+| IVPN | dynamic catalog or static catalog | Public server metadata can be refreshed automatically; declare alternate WireGuard ports or pinned fallback servers when needed. |
+| Mullvad | dynamic catalog or static catalog | Public relay metadata can be refreshed automatically and supports WireGuard peer `reserved` bytes. |
 | NordVPN | static catalog | Declare NordLynx/WireGuard endpoint metadata. |
-| Surfshark | static catalog | Declare endpoint metadata and filter by location/features. |
+| Surfshark | dynamic catalog or static catalog | Public WireGuard cluster metadata can be refreshed automatically; static catalogs can pin metadata locally. |
 | Windscribe | static catalog | Declare provider-specific WireGuard ports and peer public keys from the provider catalog. |
 | Custom | static catalog | Use for any provider with known WireGuard endpoint metadata. |
 
 Providers that only expose OpenVPN are intentionally not modeled because PSO renders sing-box WireGuard endpoints only.
 
-## Static Catalog Schema
+## Catalog Schema
 
-Static providers live under `providers.wireguard` in `pso.config.json`:
+Dynamic or static WireGuard providers live under `providers.wireguard` in `pso.config.json`:
 
 ```json
 {
@@ -42,33 +43,24 @@ Static providers live under `providers.wireguard` in `pso.config.json`:
     "wireguard": [
       {
         "name": "mullvad",
+        "source": { "type": "mullvad_api" },
         "default_port": 51820,
         "local_address": ["10.64.10.2/32"],
         "allowed_ips": ["0.0.0.0/0", "::/0"],
-        "persistent_keepalive_interval": 25,
-        "servers": [
-          {
-            "id": "se-sto-wg-001",
-            "name": "SE Stockholm WG 001",
-            "country": "SE",
-            "city": "Stockholm",
-            "endpoint": "198.51.100.10",
-            "public_key": "replace-with-provider-peer-public-key",
-            "features": ["p2p"],
-            "reserved": [0, 0, 0]
-          }
-        ]
+        "persistent_keepalive_interval": 25
       }
     ]
   }
 }
 ```
 
-`local_address` is the tunnel address assigned by the provider for the local WireGuard identity. It can be declared at provider, server, or template-endpoint level. PSO does not accept a WireGuard private key from config; it generates and persists local private/public key material in SQLite. If a provider requires public-key registration, register the public key PSO records for the endpoint out of band or extend PSO with a provider-specific dynamic API implementation.
+`source` defaults to `{"type":"static"}`. Built-in dynamic sources are `mullvad_api`, `ivpn_api`, and `surfshark_api`. For dynamic catalogs, `servers` is optional and acts as a local fallback when the public API is unavailable or when you want to pin known-good metadata. `local_address` is still the tunnel address assigned by the provider for the local WireGuard identity; it can be declared at provider, server, or template-endpoint level. PSO does not accept a WireGuard private key from config; it generates and persists local private/public key material in SQLite. If a provider requires public-key registration, register the public key PSO records for the endpoint out of band or extend PSO with a provider-specific dynamic API implementation.
+
+Public provider catalogs often expose provider-native location labels such as `Sweden` instead of ISO country codes. Template filters should match the actual catalog values that the provider returns.
 
 ## Template Endpoints
 
-A static provider endpoint references the catalog by name:
+A provider endpoint references the catalog by name:
 
 ```json
 {
@@ -76,17 +68,15 @@ A static provider endpoint references the catalog by name:
   "tag": "mullvad-se-stockholm",
   "provider": "mullvad",
   "filter": {
-    "country": ["SE"],
+    "country": ["Sweden"],
     "city": "Stockholm",
-    "features": ["p2p"],
-    "max_load": 75,
     "status": 1,
-    "sort_by": "load_asc"
+    "sort_by": "name_asc"
   }
 }
 ```
 
-Supported static filter fields are `server`, `country`, `city`, `region`, `features`, `max_load`, `status`, and `sort_by` (`load_asc` or `name_asc`). On unhealthy probes, PSO attempts to reselect the next matching server when more than one candidate exists.
+Supported filter fields are `server`, `country`, `city`, `region`, `features`, `max_load`, `status`, and `sort_by` (`load_asc` or `name_asc`). On unhealthy probes, PSO attempts to reselect the next matching server when more than one candidate exists. For dynamic catalogs, matching is done against the provider's published country, city, and region strings.
 
 Proton endpoints remain dynamic and use the Proton-specific filter model:
 

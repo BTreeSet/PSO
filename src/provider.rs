@@ -30,13 +30,13 @@ pub const KNOWN_WIREGUARD_PROVIDERS: &[KnownWireGuardProvider] = &[
     },
     KnownWireGuardProvider {
         name: "ivpn",
-        mode: "static-wireguard-catalog",
-        notes: "Supports IVPN WireGuard hostnames, peer public keys, and alternate provider ports when supplied in the catalog.",
+        mode: "dynamic-catalog",
+        notes: "Supports automatic IVPN public server-catalog refresh or a static fallback catalog when the provider metadata must be pinned locally.",
     },
     KnownWireGuardProvider {
         name: "mullvad",
-        mode: "static-wireguard-catalog",
-        notes: "Supports Mullvad WireGuard catalogs and peer reserved bytes when the provider metadata requires them.",
+        mode: "dynamic-catalog",
+        notes: "Supports automatic Mullvad public relay discovery, static fallback catalogs, and peer reserved bytes when the provider metadata requires them.",
     },
     KnownWireGuardProvider {
         name: "nordvpn",
@@ -45,8 +45,8 @@ pub const KNOWN_WIREGUARD_PROVIDERS: &[KnownWireGuardProvider] = &[
     },
     KnownWireGuardProvider {
         name: "surfshark",
-        mode: "static-wireguard-catalog",
-        notes: "Declare Surfshark WireGuard endpoint metadata and use template filters for region, country, and city selection.",
+        mode: "dynamic-catalog",
+        notes: "Supports automatic Surfshark public WireGuard catalog refresh or a static fallback catalog for pinned provider metadata.",
     },
     KnownWireGuardProvider {
         name: "windscribe",
@@ -89,10 +89,23 @@ impl ProvidersConfig {
             if !names.insert(name.clone()) {
                 anyhow::bail!("duplicate WireGuard provider catalog '{name}'");
             }
-            if provider.servers.is_empty() {
-                anyhow::bail!(
-                    "WireGuard provider catalog '{name}' must contain at least one server"
-                );
+            match provider.source {
+                WireGuardProviderSource::Static => {
+                    if provider.servers.is_empty() {
+                        anyhow::bail!(
+                            "WireGuard provider catalog '{name}' must contain at least one server"
+                        );
+                    }
+                }
+                WireGuardProviderSource::MullvadApi => {
+                    validate_dynamic_provider_name(&provider.name, "mullvad")?;
+                }
+                WireGuardProviderSource::IvpnApi => {
+                    validate_dynamic_provider_name(&provider.name, "ivpn")?;
+                }
+                WireGuardProviderSource::SurfsharkApi => {
+                    validate_dynamic_provider_name(&provider.name, "surfshark")?;
+                }
             }
             for server in &provider.servers {
                 server.validate(&provider.name)?;
@@ -102,10 +115,21 @@ impl ProvidersConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireGuardProviderSource {
+    #[default]
+    Static,
+    MullvadApi,
+    IvpnApi,
+    SurfsharkApi,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct WireGuardProviderConfig {
     pub name: String,
+    pub source: WireGuardProviderSource,
     pub default_port: Option<u16>,
     pub local_address: Vec<String>,
     pub allowed_ips: Vec<String>,
@@ -117,6 +141,7 @@ impl Default for WireGuardProviderConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
+            source: WireGuardProviderSource::Static,
             default_port: Some(51820),
             local_address: Vec::new(),
             allowed_ips: default_allowed_ips(),
@@ -257,6 +282,18 @@ pub fn known_wireguard_providers() -> &'static [KnownWireGuardProvider] {
 
 pub fn normalize_provider_name(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn validate_dynamic_provider_name(actual: &str, expected: &str) -> Result<()> {
+    let actual = normalize_provider_name(actual);
+    if actual != expected {
+        anyhow::bail!(
+            "WireGuard provider source '{}' requires provider name '{}'",
+            expected,
+            expected
+        );
+    }
+    Ok(())
 }
 
 pub fn select_wireguard_server(

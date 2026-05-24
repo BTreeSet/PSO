@@ -5,6 +5,9 @@
         "wireguard": [
             {
                 "name": "mullvad",
+                "source": {
+                    "type": "mullvad_api"
+                },
                 "default_port": 51820,
                 "local_address": [
                     "10.64.10.2/32",
@@ -14,27 +17,7 @@
                     "0.0.0.0/0",
                     "::/0"
                 ],
-                "persistent_keepalive_interval": 25,
-                "servers": [
-                    {
-                        "id": "se-sto-wg-001",
-                        "name": "SE Stockholm WG 001",
-                        "country": "SE",
-                        "city": "Stockholm",
-                        "endpoint": "198.51.100.10",
-                        "public_key": "replace-with-provider-peer-public-key",
-                        "load": 10,
-                        "status": 1,
-                        "features": [
-                            "p2p"
-                        ],
-                        "reserved": [
-                            0,
-                            0,
-                            0
-                        ]
-                    }
-                ]
+                "persistent_keepalive_interval": 25
             },
             {
                 "name": "custom",

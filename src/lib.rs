@@ -12,6 +12,7 @@ pub mod model;
 pub mod process;
 pub mod proton;
 pub mod provider;
+mod provider_discovery;
 pub mod provisioning;
 pub mod scheduler;
 pub mod session;
