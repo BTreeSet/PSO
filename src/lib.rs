@@ -14,6 +14,9 @@ pub mod scheduler;
 pub mod session;
 pub mod singbox_adapter;
 pub mod state;
+mod state_model;
+pub mod supervisor;
+mod supervisor_render;
 pub mod template;
 
 pub use api::{CertificateRequest, CertificateResponse, ProtonApiClient};
@@ -28,5 +31,5 @@ pub use process::{find_process_pid, find_process_pid_by_exe, sighup_process};
 pub use provisioning::{LocalKeyProvisioner, WireGuardCredentials, WireGuardProvisioner};
 pub use scheduler::{RefreshDecision, RefreshScheduler};
 pub use session::{ActiveOutbound, SessionStore, UserSession};
-pub use singbox_adapter::{SingboxWireGuardOutbound, build_wireguard_outbound};
+pub use singbox_adapter::{SingboxWireGuardEndpoint, build_wireguard_endpoint};
 pub use template::hydrate_template;

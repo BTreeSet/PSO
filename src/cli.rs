@@ -59,6 +59,7 @@ pub struct StateArgs {
 #[derive(Debug, Subcommand)]
 pub enum StateCommand {
     Accounts,
+    Certs(StateListArgs),
     Events(StateListArgs),
     Health(StateListArgs),
 }

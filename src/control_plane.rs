@@ -13,7 +13,7 @@ use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::model::PhysicalServer;
 use crate::process::sighup_process;
 use crate::scheduler::{RefreshDecision, RefreshScheduler};
-use crate::singbox_adapter::build_wireguard_outbound;
+use crate::singbox_adapter::build_wireguard_endpoint;
 
 #[derive(Clone, Debug)]
 pub struct ControlPlaneConfig {
@@ -59,7 +59,7 @@ impl ControlPlane {
 
             let decision = match result {
                 Ok(certificate) => {
-                    let outbound = build_wireguard_outbound(
+                    let outbound = build_wireguard_endpoint(
                         &config.outbound_tag,
                         &key_material,
                         &certificate,
@@ -67,7 +67,7 @@ impl ControlPlane {
                     )?;
                     write_singbox_config(
                         &config.active_config,
-                        &json!({ "outbounds": [outbound] }),
+                        &json!({ "endpoints": [outbound] }),
                     )?;
                     sighup_process(config.singbox_pid)?;
 
@@ -107,13 +107,13 @@ impl ControlPlane {
             .api
             .get_certificate(&config.access_token, &request)
             .await?;
-        let outbound = build_wireguard_outbound(
+        let outbound = build_wireguard_endpoint(
             &config.outbound_tag,
             &key_material,
             &certificate,
             &config.selected_server,
         )?;
-        write_singbox_config(&config.active_config, &json!({ "outbounds": [outbound] }))?;
+        write_singbox_config(&config.active_config, &json!({ "endpoints": [outbound] }))?;
         sighup_process(config.singbox_pid)?;
         info!(tag = %config.outbound_tag, "certificate refreshed and sing-box reloaded");
         Ok(CertificateRefreshOutcome {

@@ -22,6 +22,10 @@
             {
                 "username": "alice@example.com",
                 "tier": "Plus"
+            },
+            {
+                "username": "bob_free_tier@example.com",
+                "tier": "Free"
             }
         ]
     },

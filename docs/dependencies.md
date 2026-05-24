@@ -23,7 +23,7 @@ The current direct runtime dependency graph was captured with `cargo tree -e nor
 - `sha2 0.11.0`: SRP hashing.
 - `sysinfo 0.39.2`: sing-box process discovery.
 - `tempfile 3.27.0`: atomic config write support.
-- `tokio 1.52.3`: async runtime, timers, process, signal support.
+- `tokio 1.52.3`: async runtime, timers, process, signal, and supervisor channel/mutex support.
 - `tracing 0.1.44`, `tracing-subscriber 0.3.23`: structured logging.
 - `x25519-dalek 2.0.1`: local WireGuard X25519 key generation.
 

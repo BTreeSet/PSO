@@ -6,8 +6,8 @@ This roadmap lists technical directions that fit PSO's goal: automatic `sing-box
 
 - State directory ownership: keep generated and persistent runtime state under one opaque state directory. SQLite owns VPN session state, certificate metadata, runtime events, and health history; raw topology remains as JSON for provider troubleshooting.
 - Token-aware commands: allow commands that currently accept `PSO_PROTON_ACCESS_TOKEN` to refresh VPN access tokens from state automatically.
-- Multi-outbound daemon loop: continuously fetch topology, select targets from declarative filters, refresh WireGuard certificates, write sing-box config, and reload with SIGHUP.
-- Health-driven recovery: combine Cloudflare/ipinfo probe results with outbound state to reselect servers when an outbound is dead or leaking.
+- Multi-endpoint daemon loop hardening: extend the current supervisor with server reselection policy, per-endpoint backoff tuning, and graceful shutdown.
+- Health-driven recovery: combine Cloudflare/ipinfo probe results with endpoint certificate state to reselect servers when a refreshed endpoint remains dead or leaking.
 - Mock integration tests: add a local mock Proton API and a fake sing-box process/signal target for deterministic CI coverage.
 
 ## Container Operation

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::filter::{ServerFilter, select_target};
 use crate::model::LogicalServer;
@@ -64,19 +64,23 @@ fn hydrate_outbound(
     object.remove("provider");
     object.remove("user");
     object.remove("filter");
-    insert_string(object, "server", credentials.server);
     object.insert(
-        "local_address".into(),
-        Value::Array(
-            credentials
-                .local_address
-                .into_iter()
-                .map(Value::String)
-                .collect(),
-        ),
+        "address".into(),
+        Value::Array(credentials.address.into_iter().map(Value::String).collect()),
     );
     insert_string(object, "private_key", credentials.private_key);
-    insert_string(object, "peer_public_key", credentials.peer_public_key);
+    object.entry("system").or_insert(Value::Bool(false));
+    object.entry("mtu").or_insert(Value::Number(1408.into()));
+    object.insert(
+        "peers".into(),
+        json!([{
+            "address": credentials.peer_address,
+            "port": credentials.peer_port,
+            "public_key": credentials.peer_public_key,
+            "allowed_ips": credentials.allowed_ips,
+            "persistent_keepalive_interval": 25
+        }]),
+    );
 
     Ok(())
 }
@@ -145,8 +149,10 @@ mod tests {
 
         let outbound = &rendered["outbounds"][0];
         assert!(outbound.get("provider").is_none());
-        assert_eq!(outbound["server"], "198.51.100.10:51820");
-        assert_eq!(outbound["peer_public_key"], "peer-key");
+        assert_eq!(outbound["address"][0], "10.2.0.2/32");
+        assert_eq!(outbound["peers"][0]["address"], "198.51.100.10");
+        assert_eq!(outbound["peers"][0]["port"], 51820);
+        assert_eq!(outbound["peers"][0]["public_key"], "peer-key");
         assert!(outbound["private_key"].as_str().unwrap().len() > 40);
     }
 }

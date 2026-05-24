@@ -1,10 +1,13 @@
 {
-    "outbounds": [
+    "endpoints": [
         {
             "type": "wireguard",
             "tag": "proton-p2p-nl",
             "provider": "proton",
             "user": "alice@example.com",
+            "health": {
+                "proxy_url": "socks5h://127.0.0.1:1081"
+            },
             "filter": {
                 "country": [
                     "NL",
@@ -28,6 +31,9 @@
             "tag": "proton-free-jp",
             "provider": "proton",
             "user": "bob_free_tier@example.com",
+            "health": {
+                "proxy_url": "socks5h://127.0.0.1:1082"
+            },
             "filter": {
                 "country": [
                     "JP"

@@ -1,12 +1,13 @@
 use anyhow::Result;
 use pso::cli::{StateArgs, StateCommand, StateListArgs};
 use pso::config::RuntimeContext;
-use pso::state::{AccountRow, HealthCheckRow, RuntimeEventRow, StateStore};
+use pso::state::{AccountRow, CertificateRow, HealthCheckRow, RuntimeEventRow, StateStore};
 
 pub fn run_state(context: &RuntimeContext, args: StateArgs) -> Result<()> {
     let store = StateStore::open(context)?;
     match args.command {
         StateCommand::Accounts => print_accounts(&store.list_accounts()?),
+        StateCommand::Certs(args) => print_certs(&store.list_certificates(args.limit)?, &args),
         StateCommand::Events(args) => print_events(&store.list_events(args.limit)?, &args),
         StateCommand::Health(args) => print_health(&store.list_health_checks(args.limit)?, &args),
     }
@@ -42,6 +43,37 @@ fn print_events(rows: &[RuntimeEventRow], args: &StateListArgs) -> Result<()> {
             row.outbound_tag.as_deref().unwrap_or("-"),
             row.event_type,
             row.details_json.as_deref().unwrap_or("-")
+        );
+    }
+    Ok(())
+}
+
+fn print_certs(rows: &[CertificateRow], args: &StateListArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(rows)?);
+        return Ok(());
+    }
+
+    println!(
+        "updated_at\toutbound\tusername\tserver\tendpoint\tassigned_ip\trefresh_at_ms\texpires_at_ms\tfailures\tlast_error"
+    );
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.updated_at,
+            row.outbound_tag,
+            row.username,
+            row.server_name,
+            row.endpoint,
+            row.assigned_ip.as_deref().unwrap_or("-"),
+            row.refresh_at_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into()),
+            row.expires_at_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into()),
+            row.consecutive_failures,
+            row.last_error.as_deref().unwrap_or("-")
         );
     }
     Ok(())
