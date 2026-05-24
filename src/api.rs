@@ -1,11 +1,15 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use reqwest::{
+    Client, RequestBuilder, Response, StatusCode,
+    header::{HeaderMap, HeaderValue},
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;
 
 use crate::auth::SrpProof;
+use crate::config::{ProtonClientProfile, RuntimeContext};
 use crate::model::{LogicalServer, ProtonLogicalResponse};
 
 const PROTON_LOGICALS_PROTOCOLS: &str = "WireGuardUDP,WireGuardTCP,WireGuardTLS";
@@ -14,20 +18,40 @@ const PROTON_LOGICALS_PROTOCOLS: &str = "WireGuardUDP,WireGuardTCP,WireGuardTLS"
 pub struct ProtonApiClient {
     base_url: String,
     client: Client,
+    client_id: String,
 }
 
 impl ProtonApiClient {
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
+        Self::with_profile(base_url, &ProtonClientProfile::default())
+    }
+
+    pub fn from_context(context: &RuntimeContext) -> Result<Self> {
+        Self::with_profile(&context.api_base_url, &context.proton_client)
+    }
+
+    pub fn with_profile(
+        base_url: impl Into<String>,
+        profile: &ProtonClientProfile,
+    ) -> Result<Self> {
+        let mut default_headers = HeaderMap::new();
+        default_headers.insert(
+            "x-pm-appversion",
+            HeaderValue::from_str(&profile.app_version_header)
+                .context("invalid Proton x-pm-appversion header value")?,
+        );
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(20))
             .timeout(Duration::from_secs(30))
-            .user_agent("PSO/0.1 Rust-Control-Plane")
+            .default_headers(default_headers)
+            .user_agent(profile.user_agent.clone())
             .build()?;
 
         Ok(Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client,
+            client_id: profile.client_id.clone(),
         })
     }
 
@@ -59,6 +83,7 @@ impl ProtonApiClient {
                 ("WithEntriesForProtocols", PROTON_LOGICALS_PROTOCOLS),
                 ("WithState", "true"),
             ]);
+            builder = builder.header("x-pm-response-truncation-permitted", "true");
             if let Some(country) = country {
                 builder = builder.header("x-pm-country", country);
             }
@@ -77,7 +102,7 @@ impl ProtonApiClient {
         username: &str,
         human_verification_token: Option<&str>,
     ) -> Result<LoginInfoResponse> {
-        let url = format!("{}/auth/info", self.base_url);
+        let url = format!("{}/auth/v4/info", self.base_url);
         let request = LoginInfoBody {
             username: username.to_string(),
         };
@@ -100,7 +125,7 @@ impl ProtonApiClient {
         two_factor_code: Option<&str>,
         human_verification_token: Option<&str>,
     ) -> Result<AuthTokens> {
-        let url = format!("{}/auth", self.base_url);
+        let url = format!("{}/auth/v4", self.base_url);
         let request = LoginBody {
             username: username.to_string(),
             client_ephemeral: srp.client_ephemeral.clone(),
@@ -127,7 +152,7 @@ impl ProtonApiClient {
         let url = format!("{}/auth/v4/sessions/forks", self.base_url);
         let request = SessionForkBody {
             payload: payload.unwrap_or_default(),
-            child_client_id: "ProtonVPN_Linux".into(),
+            child_client_id: self.client_id.clone(),
             independent: 1,
             user_code: None,
         };
@@ -428,12 +453,12 @@ mod tests {
 
         let fork = serde_json::to_value(SessionForkBody {
             payload: "payload".into(),
-            child_client_id: "ProtonVPN_Linux".into(),
+            child_client_id: "android-vpn".into(),
             independent: 1,
             user_code: Some("code".into()),
         })
         .unwrap();
-        assert_eq!(fork["ChildClientID"], "ProtonVPN_Linux");
+        assert_eq!(fork["ChildClientID"], "android-vpn");
         assert_eq!(fork["Payload"], "payload");
         assert_eq!(fork["Independent"], 1);
         assert_eq!(fork["UserCode"], "code");

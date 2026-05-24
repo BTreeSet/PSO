@@ -12,9 +12,7 @@ use crate::api::{CertificateRequest, ProtonApiClient};
 use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::model::PhysicalServer;
 use crate::process::sighup_process;
-use crate::proton::{
-    PROTON_CLIENT_DEVICE_NAME, PROTON_WIREGUARD_KEEPALIVE_INTERVAL, proton_wireguard_assigned_ips,
-};
+use crate::proton::{PROTON_WIREGUARD_KEEPALIVE_INTERVAL, proton_wireguard_assigned_ips};
 use crate::scheduler::{RefreshDecision, RefreshScheduler};
 use crate::singbox_adapter::build_wireguard_endpoint;
 
@@ -24,6 +22,7 @@ pub struct ControlPlaneConfig {
     pub active_config: PathBuf,
     pub singbox_pid: i32,
     pub outbound_tag: String,
+    pub device_name: String,
     pub selected_server: PhysicalServer,
 }
 
@@ -55,7 +54,7 @@ impl ControlPlane {
         loop {
             let request = CertificateRequest::wireguard_session(
                 &key_material.public_key_base64,
-                PROTON_CLIENT_DEVICE_NAME,
+                &config.device_name,
             );
             let result = self
                 .api
@@ -123,7 +122,7 @@ impl ControlPlane {
         let key_material = generate_key_material();
         let request = CertificateRequest::wireguard_session(
             &key_material.public_key_base64,
-            PROTON_CLIENT_DEVICE_NAME,
+            &config.device_name,
         );
         let certificate = self
             .api

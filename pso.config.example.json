@@ -40,6 +40,9 @@
   },
   "auth": {
     "proton": {
+      "client_id": "android-vpn",
+      "app_version": "5.18.46.0",
+      "device_name": "pso-control-plane-1",
       "accounts": [
         {
           "name": "alice-plus",

@@ -16,8 +16,8 @@ use crate::filter::{ServerFilter, select_target};
 use crate::health::{HealthMonitor, HealthStatus, ProbeResult};
 use crate::model::{LogicalServer, PhysicalServer, ProtonLogicalResponse};
 use crate::proton::{
-    CachedAccessToken, PROTON_CLIENT_DEVICE_NAME, PROTON_WIREGUARD_KEEPALIVE_INTERVAL,
-    ensure_account_access_token, proton_wireguard_assigned_ips,
+    CachedAccessToken, PROTON_WIREGUARD_KEEPALIVE_INTERVAL, ensure_account_access_token,
+    proton_wireguard_assigned_ips,
 };
 use crate::provider::{
     PROTON_PROVIDER, ProvidersConfig, WireGuardEndpointOverrides, WireGuardServerFilter,
@@ -548,10 +548,10 @@ async fn ensure_certificate(
         }
     };
 
-    let api = ProtonApiClient::new(&runtime.context.api_base_url)?;
+    let api = ProtonApiClient::from_context(&runtime.context)?;
     let request = CertificateRequest::wireguard_session(
         &key_material.public_key_base64,
-        PROTON_CLIENT_DEVICE_NAME,
+        &runtime.context.proton_client.device_name,
     );
     let certificate = match api.get_certificate(access_token, &request).await {
         Ok(certificate) => certificate,
@@ -607,7 +607,7 @@ async fn refresh_topology(runtime: &SupervisorRuntime, account_name: &str) -> Re
     let output = topology_output_path(&runtime.context, &runtime.render);
     let account = runtime.proton_accounts.get_required(account_name)?;
     let token = access_token_for_account(runtime, account_name).await?;
-    let api = ProtonApiClient::new(&runtime.context.api_base_url)?;
+    let api = ProtonApiClient::from_context(&runtime.context)?;
     match api
         .get_logicals(
             &token,

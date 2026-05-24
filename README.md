@@ -5,6 +5,7 @@ Proton-Singbox Orchestrator (PSO) is a Rust control plane for producing and main
 PSO is pre-alpha. The current codebase supports the core pieces needed for local development and container-oriented operation:
 
 - Proton SRP login, optional TOTP, and per-account auth-session refresh or re-login.
+- Android-shaped Proton client metadata with configurable `x-pm-appversion`, User-Agent, and certificate device name defaults.
 - Proton refresh-token persistence in SQLite plus topology persistence in a user-opaque state directory.
 - Proton `/vpn/v2/logicals` topology fetching with state fallback for temporary endpoint failures.
 - Declarative WireGuard endpoint rendering from `config.template.json`, Proton logical server data, and WireGuard provider catalogs for non-Proton providers.
@@ -88,6 +89,8 @@ Credential input options:
 - `--totp` or `PSO_PROTON_TOTP` when the account requires 2FA. The value may be a six-digit one-time code, a base32 TOTP secret, or an `otpauth://` URI.
 - `--no-prompt` for headless deployments
 - `--account` to select a configured Proton account, or `--username` for an ad hoc one-off login outside the config file
+
+PSO sends Proton requests with a configurable client profile under `auth.proton`. By default it uses an Android-shaped `x-pm-appversion` header and a `ProtonVPN/...` User-Agent derived from the configured profile. Set `auth.proton.client_id`, `auth.proton.app_version`, `auth.proton.device_name`, or `auth.proton.user_agent` when you need to pin PSO to a specific upstream Proton client profile. `auth.proton.device_name` is also used for `/vpn/v1/certificate` registration; when it is omitted, PSO falls back to the host `HOSTNAME` and then `pso-control-plane`.
 
 On success, PSO writes Proton auth-session state into `PSO_STATE_DIR/pso.sqlite3` and prints the current token response unless `--output` is supplied.
 

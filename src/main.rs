@@ -13,7 +13,7 @@ use pso::cli::{
 };
 use pso::config::{
     AppConfig, AuthConfig, ControlPlaneDefaults, DEFAULT_API_BASE_URL, DEFAULT_STATE_DIR,
-    RuntimeContext, TopologyConfig, read_json, read_optional_config,
+    ProtonClientProfile, RuntimeContext, TopologyConfig, read_json, read_optional_config,
 };
 use pso::control_plane::{ControlPlane, ControlPlaneConfig};
 use pso::health::HealthMonitor;
@@ -46,6 +46,7 @@ async fn main() -> Result<()> {
             .state_dir
             .or(config.state_dir.clone())
             .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR)),
+        proton_client: ProtonClientProfile::from_auth_config(&config.auth.proton),
     };
 
     match cli.command {
@@ -196,7 +197,7 @@ async fn control_plane(
     let account = args.account.or(config.account.clone());
     let access_token =
         resolve_manual_access_token(context, auth, args.access_token, account.as_deref()).await?;
-    let api = ProtonApiClient::new(&context.api_base_url)?;
+    let api = ProtonApiClient::from_context(context)?;
     let control_plane = ControlPlane::new(api);
     control_plane
         .run_refresh_loop(ControlPlaneConfig {
@@ -207,6 +208,7 @@ async fn control_plane(
                 .outbound_tag
                 .or(config.outbound_tag.clone())
                 .unwrap_or_else(|| "proton-wg".to_string()),
+            device_name: context.proton_client.device_name.clone(),
             selected_server: PhysicalServer {
                 id: String::new(),
                 name: String::new(),
@@ -233,7 +235,7 @@ async fn fetch_logicals(
     config: &TopologyConfig,
     args: FetchLogicalsArgs,
 ) -> Result<()> {
-    let api = ProtonApiClient::new(&context.api_base_url)?;
+    let api = ProtonApiClient::from_context(context)?;
     let state_logicals = topology_state_file(context);
     let account = args.account.or(config.account.clone());
     let access_token =

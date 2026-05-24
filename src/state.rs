@@ -703,6 +703,7 @@ mod tests {
         let context = RuntimeContext {
             api_base_url: "http://localhost".into(),
             state_dir: temp.path().into(),
+            proton_client: crate::config::ProtonClientProfile::default(),
         };
         let store = StateStore::open(&context).unwrap();
 

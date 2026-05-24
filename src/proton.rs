@@ -7,7 +7,6 @@ use crate::config::RuntimeContext;
 use crate::state::{ProtonSessionState, StateStore};
 
 const ACCESS_TOKEN_REFRESH_MARGIN_MS: i64 = 60_000;
-pub const PROTON_CLIENT_DEVICE_NAME: &str = "PSO-Rust-Control-Plane";
 pub const PROTON_WIREGUARD_ADDRESS_V4: &str = "10.2.0.2/32";
 pub const PROTON_WIREGUARD_KEEPALIVE_INTERVAL: u16 = 60;
 
@@ -41,7 +40,7 @@ pub async fn login_with_prompts(
     no_prompt: bool,
     human_verification_token: Option<&str>,
 ) -> Result<AuthTokens> {
-    let api = ProtonApiClient::new(&context.api_base_url)?;
+    let api = ProtonApiClient::from_context(context)?;
     let info = api.auth_info(username, human_verification_token).await?;
     if info.version != 4 {
         bail!("unsupported Proton SRP auth version {}", info.version);
@@ -118,7 +117,7 @@ pub async fn refresh_stored_proton_session(
     context: &RuntimeContext,
     state: &ProtonSessionState,
 ) -> Result<AuthTokens> {
-    let api = ProtonApiClient::new(&context.api_base_url)?;
+    let api = ProtonApiClient::from_context(context)?;
     api.refresh_session(&state.uid, &state.refresh_token).await
 }
 
