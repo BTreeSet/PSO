@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::provider::ProvidersConfig;
+
 pub const DEFAULT_API_BASE_URL: &str = "https://api.protonvpn.ch";
 pub const DEFAULT_STATE_DIR: &str = "pso-state";
 
@@ -18,6 +20,7 @@ pub struct RuntimeContext {
 pub struct AppConfig {
     pub api_base_url: Option<String>,
     pub state_dir: Option<PathBuf>,
+    pub providers: ProvidersConfig,
     pub auth: AuthConfig,
     pub topology: TopologyConfig,
     pub render: RenderConfig,

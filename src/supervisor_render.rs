@@ -10,14 +10,17 @@ use crate::config::{RenderConfig, RuntimeContext, SessionEntry};
 use crate::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use crate::filter::ServerFilter;
 use crate::process::{find_process_pid, find_process_pid_by_exe};
+use crate::provider::{PROTON_PROVIDER, WireGuardServerFilter, normalize_provider_name};
 use crate::session::UserSession;
-use crate::singbox_adapter::{default_allowed_ips, split_endpoint};
-use crate::state::{OutboundCertificateState, StateStore};
-use crate::supervisor::{ProtonEndpointSpec, SupervisorRuntime};
+use crate::singbox_adapter::split_endpoint;
+use crate::state::{StateStore, WireGuardEndpointState};
+use crate::supervisor::{
+    EndpointSpec, ProtonEndpointSpec, StaticWireGuardEndpointSpec, SupervisorRuntime,
+};
 
 pub(crate) async fn render_and_deploy(runtime: &SupervisorRuntime) -> Result<()> {
     let mut rendered = runtime.template.clone();
-    let states = certificate_states_by_tag(&runtime.context, &runtime.specs)?;
+    let states = wireguard_states_by_tag(&runtime.context, &runtime.specs)?;
     hydrate_wireguard_entries(&mut rendered, &states)?;
 
     let output_path = rendered_output_path(&runtime.context, &runtime.render);
@@ -33,7 +36,7 @@ pub(crate) async fn render_and_deploy(runtime: &SupervisorRuntime) -> Result<()>
         &runtime
             .specs
             .iter()
-            .map(|spec| spec.tag.as_str())
+            .map(EndpointSpec::tag)
             .collect::<Vec<_>>(),
     )?;
 
@@ -93,7 +96,7 @@ pub(crate) async fn render_and_deploy(runtime: &SupervisorRuntime) -> Result<()>
     Ok(())
 }
 
-pub(crate) fn proton_endpoint_specs(template: &Value) -> Result<Vec<ProtonEndpointSpec>> {
+pub(crate) fn endpoint_specs(template: &Value) -> Result<Vec<EndpointSpec>> {
     let mut specs = Vec::new();
     let mut seen = BTreeSet::new();
     for section in ["endpoints", "outbounds"] {
@@ -104,44 +107,113 @@ pub(crate) fn proton_endpoint_specs(template: &Value) -> Result<Vec<ProtonEndpoi
             let object = entry
                 .as_object()
                 .ok_or_else(|| anyhow!("{section} entries must be JSON objects"))?;
-            if object.get("provider").and_then(Value::as_str) != Some("proton") {
+            let Some(provider) = object.get("provider").and_then(Value::as_str) else {
                 continue;
-            }
+            };
+            let provider = normalize_provider_name(provider);
             let tag = object
                 .get("tag")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("proton wireguard entry is missing tag"))?
+                .ok_or_else(|| anyhow!("provider wireguard entry is missing tag"))?
                 .to_string();
             if !seen.insert(tag.clone()) {
-                anyhow::bail!("duplicate proton wireguard tag {tag}");
+                anyhow::bail!("duplicate provider wireguard tag {tag}");
             }
-            let username = object
-                .get("user")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("proton wireguard entry {tag} is missing user"))?
-                .to_string();
-            let filter: ServerFilter = serde_json::from_value(
-                object
-                    .get("filter")
-                    .cloned()
-                    .ok_or_else(|| anyhow!("proton wireguard entry {tag} is missing filter"))?,
-            )
-            .with_context(|| format!("invalid filter for proton wireguard entry {tag}"))?;
+
             let health_proxy_url = object
                 .get("health")
                 .and_then(|value| value.get("proxy_url"))
                 .and_then(Value::as_str)
                 .or_else(|| object.get("health_proxy_url").and_then(Value::as_str))
                 .map(ToOwned::to_owned);
-            specs.push(ProtonEndpointSpec {
-                tag,
-                username,
-                filter,
-                health_proxy_url,
-            });
+
+            if provider == PROTON_PROVIDER {
+                specs.push(EndpointSpec::Proton(parse_proton_spec(
+                    object,
+                    tag,
+                    health_proxy_url,
+                )?));
+            } else {
+                specs.push(EndpointSpec::StaticWireGuard(parse_static_spec(
+                    object,
+                    provider,
+                    tag,
+                    health_proxy_url,
+                )?));
+            }
         }
     }
     Ok(specs)
+}
+
+fn parse_proton_spec(
+    object: &Map<String, Value>,
+    tag: String,
+    health_proxy_url: Option<String>,
+) -> Result<ProtonEndpointSpec> {
+    let username = object
+        .get("user")
+        .or_else(|| object.get("account"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("proton wireguard entry {tag} is missing user/account"))?
+        .to_string();
+    let filter: ServerFilter = serde_json::from_value(
+        object
+            .get("filter")
+            .cloned()
+            .ok_or_else(|| anyhow!("proton wireguard entry {tag} is missing filter"))?,
+    )
+    .with_context(|| format!("invalid filter for proton wireguard entry {tag}"))?;
+
+    Ok(ProtonEndpointSpec {
+        tag,
+        username,
+        filter,
+        health_proxy_url,
+    })
+}
+
+fn parse_static_spec(
+    object: &Map<String, Value>,
+    provider: String,
+    tag: String,
+    health_proxy_url: Option<String>,
+) -> Result<StaticWireGuardEndpointSpec> {
+    let filter = match object.get("filter") {
+        Some(value) => serde_json::from_value::<WireGuardServerFilter>(value.clone())
+            .with_context(|| format!("invalid filter for {provider} wireguard entry {tag}"))?,
+        None => WireGuardServerFilter::default(),
+    };
+    let local_address = optional_string_array(object, "local_address")?;
+    let allowed_ips = optional_string_array(object, "allowed_ips")?;
+    let persistent_keepalive_interval = object
+        .get("persistent_keepalive_interval")
+        .and_then(Value::as_u64)
+        .map(u16::try_from)
+        .transpose()
+        .with_context(|| format!("persistent_keepalive_interval is invalid for {tag}"))?;
+    let reserved = match object.get("reserved") {
+        Some(value) => {
+            let bytes: Vec<u8> = serde_json::from_value(value.clone())
+                .with_context(|| format!("reserved must be a 3-byte array for {tag}"))?;
+            if bytes.len() != 3 {
+                anyhow::bail!("reserved must be a 3-byte array for {tag}");
+            }
+            Some(bytes)
+        }
+        None => None,
+    };
+
+    Ok(StaticWireGuardEndpointSpec {
+        tag,
+        provider,
+        filter,
+        local_address,
+        allowed_ips,
+        persistent_keepalive_interval,
+        reserved,
+        health_proxy_url,
+    })
 }
 
 pub(crate) fn session_map(entries: &[SessionEntry]) -> Result<BTreeMap<String, UserSession>> {
@@ -160,10 +232,13 @@ pub(crate) fn session_map(entries: &[SessionEntry]) -> Result<BTreeMap<String, U
 }
 
 pub(crate) fn ensure_sessions_exist(
-    specs: &[ProtonEndpointSpec],
+    specs: &[EndpointSpec],
     sessions: &BTreeMap<String, UserSession>,
 ) -> Result<()> {
     for spec in specs {
+        let EndpointSpec::Proton(spec) = spec else {
+            continue;
+        };
         if !sessions.contains_key(&spec.username) {
             anyhow::bail!(
                 "template endpoint {} uses {}, but render.sessions has no tier for that account",
@@ -196,25 +271,26 @@ pub(crate) fn rendered_output_path(context: &RuntimeContext, config: &RenderConf
         .unwrap_or_else(|| context.state_dir.join("rendered.config.json.tmp"))
 }
 
-fn certificate_states_by_tag(
+fn wireguard_states_by_tag(
     context: &RuntimeContext,
-    specs: &[ProtonEndpointSpec],
-) -> Result<BTreeMap<String, OutboundCertificateState>> {
+    specs: &[EndpointSpec],
+) -> Result<BTreeMap<String, WireGuardEndpointState>> {
     let store = StateStore::open(context)?;
     specs
         .iter()
         .map(|spec| {
+            let tag = spec.tag();
             let state = store
-                .load_outbound_certificate(&spec.tag)?
-                .with_context(|| format!("missing certificate state for {}", spec.tag))?;
-            Ok((spec.tag.clone(), state))
+                .load_wireguard_endpoint_state(tag)?
+                .with_context(|| format!("missing WireGuard endpoint state for {tag}"))?;
+            Ok((tag.to_string(), state))
         })
         .collect()
 }
 
 fn hydrate_wireguard_entries(
     rendered: &mut Value,
-    states: &BTreeMap<String, OutboundCertificateState>,
+    states: &BTreeMap<String, WireGuardEndpointState>,
 ) -> Result<()> {
     for section in ["endpoints", "outbounds"] {
         let Some(entries) = rendered.get_mut(section).and_then(Value::as_array_mut) else {
@@ -224,16 +300,16 @@ fn hydrate_wireguard_entries(
             let Some(object) = entry.as_object_mut() else {
                 continue;
             };
-            if object.get("provider").and_then(Value::as_str) != Some("proton") {
+            if object.get("provider").and_then(Value::as_str).is_none() {
                 continue;
             }
             let tag = object
                 .get("tag")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("proton wireguard entry is missing tag"))?;
+                .ok_or_else(|| anyhow!("provider wireguard entry is missing tag"))?;
             let state = states
                 .get(tag)
-                .with_context(|| format!("missing certificate state for {tag}"))?;
+                .with_context(|| format!("missing WireGuard endpoint state for {tag}"))?;
             apply_wireguard_endpoint_state(object, state)?;
         }
     }
@@ -242,44 +318,77 @@ fn hydrate_wireguard_entries(
 
 fn apply_wireguard_endpoint_state(
     object: &mut Map<String, Value>,
-    state: &OutboundCertificateState,
+    state: &WireGuardEndpointState,
 ) -> Result<()> {
     let (peer_address, peer_port) = split_endpoint(&state.endpoint)?;
     object.remove("provider");
     object.remove("user");
+    object.remove("account");
+    object.remove("identity");
     object.remove("filter");
     object.remove("health");
     object.remove("health_proxy_url");
     object.remove("server");
     object.remove("server_port");
     object.remove("local_address");
+    object.remove("allowed_ips");
+    object.remove("reserved");
     object.remove("peer_public_key");
     object.entry("system").or_insert(Value::Bool(false));
-    object.entry("mtu").or_insert(Value::Number(1408.into()));
+    object
+        .entry("mtu")
+        .or_insert(Value::Number(state.mtu.into()));
     object.insert(
         "address".into(),
-        Value::Array(vec![Value::String(
+        Value::Array(
             state
-                .assigned_ip
-                .clone()
-                .context("certificate state is missing assigned IP")?,
-        )]),
+                .assigned_ips
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
     );
     object.insert(
         "private_key".into(),
         Value::String(state.private_key.clone()),
     );
-    object.insert(
-        "peers".into(),
-        json!([{
-            "address": peer_address,
-            "port": peer_port,
-            "public_key": state.peer_public_key,
-            "allowed_ips": default_allowed_ips(),
-            "persistent_keepalive_interval": 25
-        }]),
-    );
+    let mut peer = json!({
+        "address": peer_address,
+        "port": peer_port,
+        "public_key": state.peer_public_key,
+        "allowed_ips": state.allowed_ips
+    });
+    if let Some(keepalive) = state.persistent_keepalive_interval {
+        peer["persistent_keepalive_interval"] = Value::Number(keepalive.into());
+    }
+    if let Some(reserved) = &state.reserved {
+        peer["reserved"] = Value::Array(
+            reserved
+                .iter()
+                .map(|value| Value::Number((*value).into()))
+                .collect(),
+        );
+    }
+    object.insert("peers".into(), Value::Array(vec![peer]));
     Ok(())
+}
+
+fn optional_string_array(object: &Map<String, Value>, key: &str) -> Result<Vec<String>> {
+    match object.get(key) {
+        None => Ok(Vec::new()),
+        Some(Value::String(value)) => Ok(vec![value.clone()]),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| anyhow!("{key} entries must be strings"))
+            })
+            .collect(),
+        Some(_) => anyhow::bail!("{key} must be a string or string array"),
+    }
 }
 
 fn resolve_singbox_pid(singbox_bin: &Path) -> Result<i32> {

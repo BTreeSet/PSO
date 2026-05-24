@@ -8,7 +8,8 @@ use pso::api::ProtonApiClient;
 use pso::auth::{calculate_srp_proof, resolve_two_factor_code};
 use pso::cli::{
     AuthCommand, Cli, Command, ControlPlaneArgs, FetchLogicalsArgs, HealthCommand, LoginArgs,
-    ProbeArgs, RefreshVpnTokenArgs, RenderArgs, RunArgs, TopologyCommand,
+    ProbeArgs, ProviderListArgs, ProvidersArgs, ProvidersCommand, RefreshVpnTokenArgs, RenderArgs,
+    RunArgs, TopologyCommand,
 };
 use pso::config::{
     AppConfig, AuthConfig, ControlPlaneDefaults, DEFAULT_API_BASE_URL, DEFAULT_STATE_DIR,
@@ -19,6 +20,7 @@ use pso::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use pso::health::HealthMonitor;
 use pso::model::{PhysicalServer, ProtonLogicalResponse};
 use pso::process::{find_process_pid, find_process_pid_by_exe};
+use pso::provider::known_wireguard_providers;
 use pso::provisioning::LocalKeyProvisioner;
 use pso::session::{SessionStore, UserSession};
 use pso::state::{StateStore, topology_state_file, write_state_file};
@@ -67,8 +69,29 @@ async fn main() -> Result<()> {
         Command::Topology(args) => match args.command {
             TopologyCommand::Fetch(args) => fetch_logicals(&context, &config.topology, args).await,
         },
+        Command::Providers(args) => providers(args),
         Command::State(args) => state_cli::run_state(&context, args),
     }
+}
+
+fn providers(args: ProvidersArgs) -> Result<()> {
+    match args.command {
+        ProvidersCommand::List(args) => list_providers(args),
+    }
+}
+
+fn list_providers(args: ProviderListArgs) -> Result<()> {
+    let providers = known_wireguard_providers();
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(providers)?);
+        return Ok(());
+    }
+
+    println!("provider\tmode\tnotes");
+    for provider in providers {
+        println!("{}\t{}\t{}", provider.name, provider.mode, provider.notes);
+    }
+    Ok(())
 }
 
 async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Result<()> {

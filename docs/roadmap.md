@@ -19,8 +19,8 @@ This roadmap lists technical directions that fit PSO's goal: automatic `sing-box
 
 ## Provider Abstraction
 
-- Provider trait boundary: separate account auth, topology, certificate/session provisioning, and health metadata behind provider-specific implementations.
-- Additional providers: evaluate support only where providers expose enough API surface for local key generation, server topology, and reliable tunnel provisioning.
+- Dynamic provider APIs: extend the current Proton-native and static WireGuard catalog model with provider-specific API implementations where providers expose enough surface for local key registration, server topology, and reliable tunnel provisioning.
+- Provider catalog imports: add import helpers for provider-issued WireGuard metadata formats without accepting private keys from config.
 - Provider chaining: model chained outbounds as explicit graph edges in declarative config rather than implicit routing side effects.
 - Mixed-provider health: track health per hop for chained routes so recovery can identify which provider or outbound failed.
 

@@ -3,13 +3,16 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use sha2::{Digest, Sha256};
 
 use crate::config::RuntimeContext;
+use crate::provider::PROTON_PROVIDER;
+use crate::singbox_adapter::default_allowed_ips;
 pub use crate::state_model::{
     AccountRow, CertificateRow, HealthCheckRow, HealthRecord, OutboundCertificateState,
-    OutboundCertificateUpdate, RuntimeEventRow, VpnSessionState,
+    OutboundCertificateUpdate, RuntimeEventRow, VpnSessionState, WireGuardEndpointRow,
+    WireGuardEndpointState, WireGuardEndpointStateUpdate,
 };
 
 pub struct StateStore {
@@ -107,6 +110,69 @@ impl StateStore {
         Ok(())
     }
 
+    pub fn load_wireguard_endpoint_state(
+        &self,
+        outbound_tag: &str,
+    ) -> Result<Option<WireGuardEndpointState>> {
+        self.connection
+            .query_row(
+                "SELECT outbound_tag, provider, identity, server_id, server_name, endpoint,
+                        peer_public_key, private_key, public_key, assigned_ips_json,
+                        allowed_ips_json, persistent_keepalive_interval, reserved_json, mtu,
+                        expires_at_ms, refresh_at_ms, updated_at
+                 FROM wireguard_endpoint_states
+                 WHERE outbound_tag = ?1",
+                params![outbound_tag],
+                |row| {
+                    let assigned_ips_json: String = row.get(9)?;
+                    let allowed_ips_json: String = row.get(10)?;
+                    let reserved_json: Option<String> = row.get(12)?;
+                    Ok(WireGuardEndpointState {
+                        outbound_tag: row.get(0)?,
+                        provider: row.get(1)?,
+                        identity: row.get(2)?,
+                        server_id: row.get(3)?,
+                        server_name: row.get(4)?,
+                        endpoint: row.get(5)?,
+                        peer_public_key: row.get(6)?,
+                        private_key: row.get(7)?,
+                        public_key: row.get(8)?,
+                        assigned_ips: decode_json_column(&assigned_ips_json, 9)?,
+                        allowed_ips: decode_json_column(&allowed_ips_json, 10)?,
+                        persistent_keepalive_interval: row.get(11)?,
+                        reserved: reserved_json
+                            .as_deref()
+                            .map(|json| decode_json_column(json, 12))
+                            .transpose()?,
+                        mtu: row.get(13)?,
+                        expires_at_ms: row.get(14)?,
+                        refresh_at_ms: row.get(15)?,
+                        updated_at: row.get(16)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn store_wireguard_endpoint_state(
+        &self,
+        update: WireGuardEndpointStateUpdate<'_>,
+    ) -> Result<()> {
+        self.upsert_wireguard_endpoint_state(&update)?;
+        self.record_event(
+            update.identity,
+            Some(update.outbound_tag),
+            "wireguard_endpoint_state_updated",
+            Some(&serde_json::to_string(&serde_json::json!({
+                "provider": update.provider,
+                "server_id": update.server_id,
+                "server_name": update.server_name,
+                "endpoint": update.endpoint,
+            }))?),
+        )
+    }
+
     pub fn load_outbound_certificate(
         &self,
         outbound_tag: &str,
@@ -186,6 +252,26 @@ impl StateStore {
                 now
             ],
         )?;
+        let assigned_ips = vec![update.assigned_ip.to_string()];
+        let allowed_ips = default_allowed_ips();
+        self.upsert_wireguard_endpoint_state(&WireGuardEndpointStateUpdate {
+            outbound_tag: update.outbound_tag,
+            provider: PROTON_PROVIDER,
+            identity: Some(update.username),
+            server_id: update.server_id,
+            server_name: update.server_name,
+            endpoint: update.endpoint,
+            peer_public_key: update.peer_public_key,
+            private_key: update.private_key,
+            public_key: update.public_key,
+            assigned_ips: &assigned_ips,
+            allowed_ips: &allowed_ips,
+            persistent_keepalive_interval: Some(25),
+            reserved: None,
+            mtu: 1408,
+            expires_at_ms: Some(update.expires_at_ms),
+            refresh_at_ms: Some(update.refresh_at_ms),
+        })?;
         self.record_event(
             Some(update.username),
             Some(update.outbound_tag),
@@ -333,6 +419,94 @@ impl StateStore {
         collect_rows(rows)
     }
 
+    pub fn list_wireguard_endpoints(&self, limit: usize) -> Result<Vec<WireGuardEndpointRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT outbound_tag, provider, identity, server_name, endpoint, assigned_ips_json,
+                    allowed_ips_json, persistent_keepalive_interval, reserved_json,
+                    refresh_at_ms, expires_at_ms, updated_at
+             FROM wireguard_endpoint_states
+             ORDER BY updated_at DESC, outbound_tag ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            let assigned_ips_json: String = row.get(5)?;
+            let allowed_ips_json: String = row.get(6)?;
+            let reserved_json: Option<String> = row.get(8)?;
+            Ok(WireGuardEndpointRow {
+                outbound_tag: row.get(0)?,
+                provider: row.get(1)?,
+                identity: row.get(2)?,
+                server_name: row.get(3)?,
+                endpoint: row.get(4)?,
+                assigned_ips: decode_json_column(&assigned_ips_json, 5)?,
+                allowed_ips: decode_json_column(&allowed_ips_json, 6)?,
+                persistent_keepalive_interval: row.get(7)?,
+                reserved: reserved_json
+                    .as_deref()
+                    .map(|json| decode_json_column(json, 8))
+                    .transpose()?,
+                refresh_at_ms: row.get(9)?,
+                expires_at_ms: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    fn upsert_wireguard_endpoint_state(
+        &self,
+        update: &WireGuardEndpointStateUpdate<'_>,
+    ) -> Result<()> {
+        let assigned_ips_json = serde_json::to_string(update.assigned_ips)?;
+        let allowed_ips_json = serde_json::to_string(update.allowed_ips)?;
+        let reserved_json = update.reserved.map(serde_json::to_string).transpose()?;
+        self.connection.execute(
+            "INSERT INTO wireguard_endpoint_states
+               (outbound_tag, provider, identity, server_id, server_name, endpoint,
+                peer_public_key, private_key, public_key, assigned_ips_json, allowed_ips_json,
+                persistent_keepalive_interval, reserved_json, mtu, expires_at_ms, refresh_at_ms,
+                updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT(outbound_tag) DO UPDATE SET
+               provider = excluded.provider,
+               identity = excluded.identity,
+               server_id = excluded.server_id,
+               server_name = excluded.server_name,
+               endpoint = excluded.endpoint,
+               peer_public_key = excluded.peer_public_key,
+               private_key = excluded.private_key,
+               public_key = excluded.public_key,
+               assigned_ips_json = excluded.assigned_ips_json,
+               allowed_ips_json = excluded.allowed_ips_json,
+               persistent_keepalive_interval = excluded.persistent_keepalive_interval,
+               reserved_json = excluded.reserved_json,
+               mtu = excluded.mtu,
+               expires_at_ms = excluded.expires_at_ms,
+               refresh_at_ms = excluded.refresh_at_ms,
+               updated_at = excluded.updated_at",
+            params![
+                update.outbound_tag,
+                update.provider,
+                update.identity,
+                update.server_id,
+                update.server_name,
+                update.endpoint,
+                update.peer_public_key,
+                update.private_key,
+                update.public_key,
+                assigned_ips_json,
+                allowed_ips_json,
+                update.persistent_keepalive_interval,
+                reserved_json,
+                update.mtu,
+                update.expires_at_ms,
+                update.refresh_at_ms,
+                unix_timestamp()?
+            ],
+        )?;
+        Ok(())
+    }
+
     fn migrate(&self) -> Result<()> {
         self.connection.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -392,12 +566,33 @@ impl StateStore {
                              success INTEGER NOT NULL,
                              error TEXT
                          );
+                         CREATE TABLE IF NOT EXISTS wireguard_endpoint_states (
+                             outbound_tag TEXT PRIMARY KEY,
+                             provider TEXT NOT NULL,
+                             identity TEXT,
+                             server_id TEXT NOT NULL,
+                             server_name TEXT NOT NULL,
+                             endpoint TEXT NOT NULL,
+                             peer_public_key TEXT NOT NULL,
+                             private_key TEXT NOT NULL,
+                             public_key TEXT NOT NULL,
+                             assigned_ips_json TEXT NOT NULL,
+                             allowed_ips_json TEXT NOT NULL,
+                             persistent_keepalive_interval INTEGER,
+                             reserved_json TEXT,
+                             mtu INTEGER NOT NULL,
+                             expires_at_ms INTEGER,
+                             refresh_at_ms INTEGER,
+                             updated_at INTEGER NOT NULL
+                         );
              CREATE INDEX IF NOT EXISTS idx_events_account_time
                ON runtime_events(account_key, occurred_at);
              CREATE INDEX IF NOT EXISTS idx_health_account_outbound_time
                              ON health_checks(account_key, outbound_tag, occurred_at);
                          CREATE INDEX IF NOT EXISTS idx_certificates_account
                              ON outbound_certificates(account_key, outbound_tag);
+                         CREATE INDEX IF NOT EXISTS idx_wireguard_provider
+                             ON wireguard_endpoint_states(provider, updated_at);
                          CREATE INDEX IF NOT EXISTS idx_config_deployments_time
                              ON config_deployments(deployed_at);",
         )?;
@@ -422,6 +617,15 @@ fn collect_rows<T>(
 ) -> Result<Vec<T>> {
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+fn decode_json_column<T: serde::de::DeserializeOwned>(
+    text: &str,
+    column: usize,
+) -> rusqlite::Result<T> {
+    serde_json::from_str(text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
+    })
 }
 
 pub fn topology_state_file(context: &RuntimeContext) -> PathBuf {

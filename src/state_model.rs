@@ -84,6 +84,63 @@ pub struct CertificateRow {
 }
 
 #[derive(Clone, Debug)]
+pub struct WireGuardEndpointState {
+    pub outbound_tag: String,
+    pub provider: String,
+    pub identity: Option<String>,
+    pub server_id: String,
+    pub server_name: String,
+    pub endpoint: String,
+    pub peer_public_key: String,
+    pub private_key: String,
+    pub public_key: String,
+    pub assigned_ips: Vec<String>,
+    pub allowed_ips: Vec<String>,
+    pub persistent_keepalive_interval: Option<u16>,
+    pub reserved: Option<Vec<u8>>,
+    pub mtu: u16,
+    pub expires_at_ms: Option<i64>,
+    pub refresh_at_ms: Option<i64>,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct WireGuardEndpointStateUpdate<'a> {
+    pub outbound_tag: &'a str,
+    pub provider: &'a str,
+    pub identity: Option<&'a str>,
+    pub server_id: &'a str,
+    pub server_name: &'a str,
+    pub endpoint: &'a str,
+    pub peer_public_key: &'a str,
+    pub private_key: &'a str,
+    pub public_key: &'a str,
+    pub assigned_ips: &'a [String],
+    pub allowed_ips: &'a [String],
+    pub persistent_keepalive_interval: Option<u16>,
+    pub reserved: Option<&'a [u8]>,
+    pub mtu: u16,
+    pub expires_at_ms: Option<i64>,
+    pub refresh_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WireGuardEndpointRow {
+    pub outbound_tag: String,
+    pub provider: String,
+    pub identity: Option<String>,
+    pub server_name: String,
+    pub endpoint: String,
+    pub assigned_ips: Vec<String>,
+    pub allowed_ips: Vec<String>,
+    pub persistent_keepalive_interval: Option<u16>,
+    pub reserved: Option<Vec<u8>>,
+    pub refresh_at_ms: Option<i64>,
+    pub expires_at_ms: Option<i64>,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct HealthRecord<'a> {
     pub username: Option<&'a str>,
     pub outbound_tag: Option<&'a str>,

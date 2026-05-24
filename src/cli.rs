@@ -24,6 +24,7 @@ pub enum Command {
     ControlPlane(ControlPlaneArgs),
     Auth(AuthArgs),
     Topology(TopologyArgs),
+    Providers(ProvidersArgs),
     State(StateArgs),
 }
 
@@ -60,8 +61,26 @@ pub struct StateArgs {
 pub enum StateCommand {
     Accounts,
     Certs(StateListArgs),
+    Wireguard(StateListArgs),
     Events(StateListArgs),
     Health(StateListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProvidersArgs {
+    #[command(subcommand)]
+    pub command: ProvidersCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProvidersCommand {
+    List(ProviderListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProviderListArgs {
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

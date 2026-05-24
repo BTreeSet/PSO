@@ -12,15 +12,21 @@ use crate::api::{AuthTokens, CertificateRequest, CertificateResponse, ProtonApiC
 use crate::config::{AppConfig, RenderConfig, RuntimeContext, TopologyConfig, read_json};
 use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::filter::{ServerFilter, select_target};
-use crate::health::{HealthMonitor, HealthStatus};
+use crate::health::{HealthMonitor, HealthStatus, ProbeResult};
 use crate::model::{LogicalServer, PhysicalServer, ProtonLogicalResponse};
+use crate::provider::{
+    PROTON_PROVIDER, ProvidersConfig, WireGuardEndpointOverrides, WireGuardServerFilter,
+    resolve_wireguard_endpoint, select_wireguard_server,
+};
 use crate::session::UserSession;
+use crate::singbox_adapter::default_allowed_ips;
 use crate::state::{
-    HealthRecord, OutboundCertificateUpdate, StateStore, topology_state_file, write_state_file,
+    HealthRecord, OutboundCertificateUpdate, StateStore, WireGuardEndpointStateUpdate,
+    topology_state_file, write_state_file,
 };
 use crate::supervisor_render::{
-    ensure_sessions_exist, proton_endpoint_specs, render_and_deploy, rendered_output_path,
-    session_map, template_path, topology_output_path,
+    endpoint_specs, ensure_sessions_exist, render_and_deploy, rendered_output_path, session_map,
+    template_path, topology_output_path,
 };
 
 const DEFAULT_COALESCE_DELAY: Duration = Duration::from_secs(5);
@@ -43,16 +49,44 @@ pub(crate) struct ProtonEndpointSpec {
     pub(crate) health_proxy_url: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct StaticWireGuardEndpointSpec {
+    pub(crate) tag: String,
+    pub(crate) provider: String,
+    pub(crate) filter: WireGuardServerFilter,
+    pub(crate) local_address: Vec<String>,
+    pub(crate) allowed_ips: Vec<String>,
+    pub(crate) persistent_keepalive_interval: Option<u16>,
+    pub(crate) reserved: Option<Vec<u8>>,
+    pub(crate) health_proxy_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum EndpointSpec {
+    Proton(ProtonEndpointSpec),
+    StaticWireGuard(StaticWireGuardEndpointSpec),
+}
+
+impl EndpointSpec {
+    pub(crate) fn tag(&self) -> &str {
+        match self {
+            Self::Proton(spec) => &spec.tag,
+            Self::StaticWireGuard(spec) => &spec.tag,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SupervisorRuntime {
     pub(crate) context: RuntimeContext,
     pub(crate) render: RenderConfig,
     pub(crate) topology: TopologyConfig,
+    pub(crate) providers: ProvidersConfig,
     pub(crate) template: Value,
-    pub(crate) specs: Vec<ProtonEndpointSpec>,
+    pub(crate) specs: Vec<EndpointSpec>,
     pub(crate) sessions: BTreeMap<String, UserSession>,
     pub(crate) options: SupervisorOptions,
-    pub(crate) token_lock: Arc<Mutex<()>>,
+    pub(crate) token_locks: Arc<BTreeMap<String, Arc<Mutex<()>>>>,
 }
 
 pub async fn run_supervisor(
@@ -60,14 +94,26 @@ pub async fn run_supervisor(
     config: &AppConfig,
     options: SupervisorOptions,
 ) -> Result<()> {
+    config.providers.validate()?;
     let template_path = template_path(&config.render);
     let template: Value = read_json(&template_path)?;
-    let specs = proton_endpoint_specs(&template)?;
+    let specs = endpoint_specs(&template)?;
     if specs.is_empty() {
-        anyhow::bail!("run requires at least one proton endpoint in the template");
+        anyhow::bail!("run requires at least one provider endpoint in the template");
     }
-    let sessions = session_map(&config.render.sessions)?;
+    let sessions = if specs
+        .iter()
+        .any(|spec| matches!(spec, EndpointSpec::Proton(_)))
+    {
+        session_map(&config.render.sessions)?
+    } else {
+        BTreeMap::new()
+    };
     ensure_sessions_exist(&specs, &sessions)?;
+    let token_locks = sessions
+        .keys()
+        .map(|username| (username.clone(), Arc::new(Mutex::new(()))))
+        .collect();
 
     let raw_ip = match options.raw_ip.clone() {
         Some(ip) => ip,
@@ -81,14 +127,17 @@ pub async fn run_supervisor(
         context: context.clone(),
         render: config.render.clone(),
         topology: config.topology.clone(),
+        providers: config.providers.clone(),
         template,
         specs,
         sessions,
         options,
-        token_lock: Arc::new(Mutex::new(())),
+        token_locks: Arc::new(token_locks),
     };
 
-    refresh_topology(&runtime, first_username(&runtime.specs)?).await?;
+    if let Some(username) = first_proton_username(&runtime.specs) {
+        refresh_topology(&runtime, username).await?;
+    }
     supervise_once(&runtime).await?;
     if runtime.options.once {
         return Ok(());
@@ -102,9 +151,11 @@ async fn run_continuous(runtime: SupervisorRuntime) -> Result<()> {
     let deploy_runtime = runtime.clone();
     tokio::spawn(async move { deployment_loop(deploy_runtime, deploy_rx).await });
 
-    let topology_runtime = runtime.clone();
-    let topology_tx = deploy_tx.clone();
-    tokio::spawn(async move { topology_loop(topology_runtime, topology_tx).await });
+    if let Some(username) = first_proton_username(&runtime.specs) {
+        let topology_runtime = runtime.clone();
+        let topology_tx = deploy_tx.clone();
+        tokio::spawn(async move { topology_loop(topology_runtime, username, topology_tx).await });
+    }
 
     for spec in runtime.specs.clone() {
         let outbound_runtime = runtime.clone();
@@ -120,7 +171,7 @@ async fn run_continuous(runtime: SupervisorRuntime) -> Result<()> {
 async fn supervise_once(runtime: &SupervisorRuntime) -> Result<()> {
     let mut changed = false;
     for spec in &runtime.specs {
-        changed |= process_outbound(runtime, spec, false).await?;
+        changed |= process_endpoint(runtime, spec, false).await?;
     }
     if changed || !rendered_output_path(&runtime.context, &runtime.render).exists() {
         render_and_deploy(runtime).await?;
@@ -128,10 +179,10 @@ async fn supervise_once(runtime: &SupervisorRuntime) -> Result<()> {
     Ok(())
 }
 
-async fn topology_loop(runtime: SupervisorRuntime, deploy_tx: mpsc::Sender<()>) {
+async fn topology_loop(runtime: SupervisorRuntime, username: String, deploy_tx: mpsc::Sender<()>) {
     loop {
         sleep(runtime.options.interval).await;
-        match refresh_topology(&runtime, first_username(&runtime.specs).unwrap_or_default()).await {
+        match refresh_topology(&runtime, username.clone()).await {
             Ok(()) => {
                 let _ = deploy_tx.send(()).await;
             }
@@ -151,21 +202,21 @@ async fn topology_loop(runtime: SupervisorRuntime, deploy_tx: mpsc::Sender<()>) 
 
 async fn outbound_loop(
     runtime: SupervisorRuntime,
-    spec: ProtonEndpointSpec,
+    spec: EndpointSpec,
     deploy_tx: mpsc::Sender<()>,
 ) {
     loop {
-        match process_outbound(&runtime, &spec, false).await {
+        match process_endpoint(&runtime, &spec, false).await {
             Ok(true) => {
                 let _ = deploy_tx.send(()).await;
             }
             Ok(false) => {}
             Err(error) => {
-                error!(tag = %spec.tag, %error, "outbound supervisor cycle failed");
+                error!(tag = %spec.tag(), %error, "outbound supervisor cycle failed");
                 record_runtime_error(
                     &runtime.context,
-                    Some(&spec.username),
-                    Some(&spec.tag),
+                    endpoint_username(&spec),
+                    Some(spec.tag()),
                     "outbound_cycle_failed",
                     &error,
                 );
@@ -192,7 +243,20 @@ async fn deployment_loop(runtime: SupervisorRuntime, mut deploy_rx: mpsc::Receiv
     }
 }
 
-async fn process_outbound(
+async fn process_endpoint(
+    runtime: &SupervisorRuntime,
+    spec: &EndpointSpec,
+    force_refresh: bool,
+) -> Result<bool> {
+    match spec {
+        EndpointSpec::Proton(spec) => process_proton_endpoint(runtime, spec, force_refresh).await,
+        EndpointSpec::StaticWireGuard(spec) => {
+            process_static_wireguard_endpoint(runtime, spec, force_refresh).await
+        }
+    }
+}
+
+async fn process_proton_endpoint(
     runtime: &SupervisorRuntime,
     spec: &ProtonEndpointSpec,
     force_refresh: bool,
@@ -213,26 +277,18 @@ async fn process_outbound(
     )
     .await?;
 
-    let raw_ip = runtime
-        .options
-        .raw_ip
-        .as_deref()
-        .context("raw IP baseline was not initialized")?;
-    let monitor = HealthMonitor::new(raw_ip.to_string(), runtime.options.interval)?;
-    let proxy_url = spec
-        .health_proxy_url
-        .as_deref()
-        .or(runtime.options.proxy_url.as_deref());
-    let probe = monitor.probe_once(proxy_url).await;
+    if cert_changed || !rendered_output_path(&runtime.context, &runtime.render).exists() {
+        return Ok(true);
+    }
+
     let store = StateStore::open(&runtime.context)?;
-    store.record_health(HealthRecord {
-        username: Some(&spec.username),
-        outbound_tag: Some(&spec.tag),
-        status: &format!("{:?}", probe.status),
-        raw_ip,
-        returned_ip: probe.returned_ip.as_deref(),
-        reason: &probe.reason,
-    })?;
+    let probe = probe_endpoint_once(
+        runtime,
+        Some(&spec.username),
+        &spec.tag,
+        spec.health_proxy_url.as_deref(),
+    )
+    .await?;
 
     if probe.status == HealthStatus::Healthy {
         return Ok(cert_changed);
@@ -250,6 +306,139 @@ async fn process_outbound(
     )?;
     ensure_certificate(runtime, spec, &selected.physical, &access_token, true).await?;
     Ok(true)
+}
+
+async fn process_static_wireguard_endpoint(
+    runtime: &SupervisorRuntime,
+    spec: &StaticWireGuardEndpointSpec,
+    force_refresh: bool,
+) -> Result<bool> {
+    let state_changed = ensure_static_wireguard_endpoint_state(runtime, spec, force_refresh)?;
+    if state_changed || !rendered_output_path(&runtime.context, &runtime.render).exists() {
+        return Ok(true);
+    }
+
+    let store = StateStore::open(&runtime.context)?;
+    let probe =
+        probe_endpoint_once(runtime, None, &spec.tag, spec.health_proxy_url.as_deref()).await?;
+
+    if probe.status == HealthStatus::Healthy {
+        return Ok(state_changed);
+    }
+
+    let details = serde_json::to_string(&json!({
+        "provider": spec.provider,
+        "status": format!("{:?}", probe.status),
+        "reason": probe.reason,
+    }))?;
+    store.record_event(
+        None,
+        Some(&spec.tag),
+        "health_reselection_requested",
+        Some(&details),
+    )?;
+    ensure_static_wireguard_endpoint_state(runtime, spec, true)
+}
+
+fn ensure_static_wireguard_endpoint_state(
+    runtime: &SupervisorRuntime,
+    spec: &StaticWireGuardEndpointSpec,
+    force_reselect: bool,
+) -> Result<bool> {
+    let provider = runtime
+        .providers
+        .wireguard_provider(&spec.provider)
+        .with_context(|| {
+            format!(
+                "template endpoint {} references unknown WireGuard provider '{}'",
+                spec.tag, spec.provider
+            )
+        })?;
+    let store = StateStore::open(&runtime.context)?;
+    let current = store.load_wireguard_endpoint_state(&spec.tag)?;
+    let avoid_server_id = force_reselect
+        .then(|| current.as_ref().map(|state| state.server_id.as_str()))
+        .flatten();
+    let selected = select_wireguard_server(provider, &spec.filter, avoid_server_id)?;
+    let resolved = resolve_wireguard_endpoint(
+        provider,
+        &selected,
+        &WireGuardEndpointOverrides {
+            local_address: spec.local_address.clone(),
+            allowed_ips: spec.allowed_ips.clone(),
+            persistent_keepalive_interval: spec.persistent_keepalive_interval,
+            reserved: spec.reserved.clone(),
+        },
+    )?;
+
+    let unchanged = current
+        .as_ref()
+        .map(|state| {
+            state.provider == resolved.provider
+                && state.server_id == resolved.server_id
+                && state.endpoint == resolved.endpoint
+                && state.peer_public_key == resolved.peer_public_key
+                && state.assigned_ips == resolved.assigned_ips
+                && state.allowed_ips == resolved.allowed_ips
+                && state.persistent_keepalive_interval == resolved.persistent_keepalive_interval
+                && state.reserved == resolved.reserved
+        })
+        .unwrap_or(false);
+    if unchanged {
+        return Ok(false);
+    }
+
+    let key_material = current
+        .as_ref()
+        .map(|state| KeyMaterial {
+            private_key_base64: state.private_key.clone(),
+            public_key_base64: state.public_key.clone(),
+        })
+        .unwrap_or_else(generate_key_material);
+    store.store_wireguard_endpoint_state(WireGuardEndpointStateUpdate {
+        outbound_tag: &spec.tag,
+        provider: &resolved.provider,
+        identity: None,
+        server_id: &resolved.server_id,
+        server_name: &resolved.server_name,
+        endpoint: &resolved.endpoint,
+        peer_public_key: &resolved.peer_public_key,
+        private_key: &key_material.private_key_base64,
+        public_key: &key_material.public_key_base64,
+        assigned_ips: &resolved.assigned_ips,
+        allowed_ips: &resolved.allowed_ips,
+        persistent_keepalive_interval: resolved.persistent_keepalive_interval,
+        reserved: resolved.reserved.as_deref(),
+        mtu: 1408,
+        expires_at_ms: None,
+        refresh_at_ms: None,
+    })?;
+    Ok(true)
+}
+
+async fn probe_endpoint_once(
+    runtime: &SupervisorRuntime,
+    username: Option<&str>,
+    outbound_tag: &str,
+    health_proxy_url: Option<&str>,
+) -> Result<ProbeResult> {
+    let raw_ip = runtime
+        .options
+        .raw_ip
+        .as_deref()
+        .context("raw IP baseline was not initialized")?;
+    let monitor = HealthMonitor::new(raw_ip.to_string(), runtime.options.interval)?;
+    let proxy_url = health_proxy_url.or(runtime.options.proxy_url.as_deref());
+    let probe = monitor.probe_once(proxy_url).await;
+    StateStore::open(&runtime.context)?.record_health(HealthRecord {
+        username,
+        outbound_tag: Some(outbound_tag),
+        status: &format!("{:?}", probe.status),
+        raw_ip,
+        returned_ip: probe.returned_ip.as_deref(),
+        reason: &probe.reason,
+    })?;
+    Ok(probe)
 }
 
 async fn ensure_certificate(
@@ -272,8 +461,37 @@ async fn ensure_certificate(
         .and_then(|state| state.refresh_at_ms)
         .map(|refresh_at_ms| refresh_at_ms <= now_ms)
         .unwrap_or(true);
+    let wireguard_state_missing = store.load_wireguard_endpoint_state(&spec.tag)?.is_none();
 
     if !force_refresh && !server_changed && !due {
+        if wireguard_state_missing {
+            let state = current.as_ref().context("missing outbound cert state")?;
+            let assigned_ip = state
+                .assigned_ip
+                .clone()
+                .context("certificate state is missing assigned IP")?;
+            let assigned_ips = vec![assigned_ip];
+            let allowed_ips = default_allowed_ips();
+            store.store_wireguard_endpoint_state(WireGuardEndpointStateUpdate {
+                outbound_tag: &spec.tag,
+                provider: PROTON_PROVIDER,
+                identity: Some(&spec.username),
+                server_id: &state.server_id,
+                server_name: &state.server_name,
+                endpoint: &state.endpoint,
+                peer_public_key: &state.peer_public_key,
+                private_key: &state.private_key,
+                public_key: &state.public_key,
+                assigned_ips: &assigned_ips,
+                allowed_ips: &allowed_ips,
+                persistent_keepalive_interval: Some(25),
+                reserved: None,
+                mtu: 1408,
+                expires_at_ms: state.expires_at_ms,
+                refresh_at_ms: state.refresh_at_ms,
+            })?;
+            return Ok(true);
+        }
         return Ok(false);
     }
 
@@ -393,7 +611,11 @@ async fn access_token_for_user(runtime: &SupervisorRuntime, username: &str) -> R
         return Ok(access_token.clone());
     }
 
-    let _guard = runtime.token_lock.lock().await;
+    let token_lock = runtime
+        .token_locks
+        .get(username)
+        .with_context(|| format!("missing token lock for {username}"))?;
+    let _guard = token_lock.lock().await;
     let store = StateStore::open(&runtime.context)?;
     let state = store.load_vpn_session(username)?;
     let api = ProtonApiClient::new(&runtime.context.api_base_url)?;
@@ -406,11 +628,18 @@ async fn access_token_for_user(runtime: &SupervisorRuntime, username: &str) -> R
     Ok(refreshed.access_token)
 }
 
-fn first_username(specs: &[ProtonEndpointSpec]) -> Result<String> {
-    specs
-        .first()
-        .map(|spec| spec.username.clone())
-        .context("at least one proton endpoint is required")
+fn first_proton_username(specs: &[EndpointSpec]) -> Option<String> {
+    specs.iter().find_map(|spec| match spec {
+        EndpointSpec::Proton(spec) => Some(spec.username.clone()),
+        EndpointSpec::StaticWireGuard(_) => None,
+    })
+}
+
+fn endpoint_username(spec: &EndpointSpec) -> Option<&str> {
+    match spec {
+        EndpointSpec::Proton(spec) => Some(&spec.username),
+        EndpointSpec::StaticWireGuard(_) => None,
+    }
 }
 
 fn endpoint_for_server(server: &PhysicalServer) -> String {

@@ -41,6 +41,26 @@
                 "tier": "Free",
                 "sort_by": "score_desc"
             }
+        },
+        {
+            "type": "wireguard",
+            "tag": "mullvad-se-stockholm",
+            "provider": "mullvad",
+            "health": {
+                "proxy_url": "socks5h://127.0.0.1:1083"
+            },
+            "filter": {
+                "country": [
+                    "SE"
+                ],
+                "city": "Stockholm",
+                "features": [
+                    "p2p"
+                ],
+                "max_load": 75,
+                "status": 1,
+                "sort_by": "load_asc"
+            }
         }
     ]
 }

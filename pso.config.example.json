@@ -1,6 +1,59 @@
 {
     "api_base_url": "https://api.protonvpn.ch",
     "state_dir": "/var/lib/pso",
+    "providers": {
+        "wireguard": [
+            {
+                "name": "mullvad",
+                "default_port": 51820,
+                "local_address": [
+                    "10.64.10.2/32",
+                    "fc00:bbbb:bbbb:bb01::2/128"
+                ],
+                "allowed_ips": [
+                    "0.0.0.0/0",
+                    "::/0"
+                ],
+                "persistent_keepalive_interval": 25,
+                "servers": [
+                    {
+                        "id": "se-sto-wg-001",
+                        "name": "SE Stockholm WG 001",
+                        "country": "SE",
+                        "city": "Stockholm",
+                        "endpoint": "198.51.100.10",
+                        "public_key": "replace-with-provider-peer-public-key",
+                        "load": 10,
+                        "status": 1,
+                        "features": [
+                            "p2p"
+                        ],
+                        "reserved": [
+                            0,
+                            0,
+                            0
+                        ]
+                    }
+                ]
+            },
+            {
+                "name": "custom",
+                "default_port": 51820,
+                "servers": [
+                    {
+                        "id": "custom-wg-001",
+                        "name": "Custom WireGuard 001",
+                        "country": "US",
+                        "endpoint": "vpn.example.net:51820",
+                        "public_key": "replace-with-provider-peer-public-key",
+                        "local_address": [
+                            "10.10.0.2/32"
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
     "auth": {
         "username": "alice@example.com",
         "password": "replace-with-protonvpn-password",
