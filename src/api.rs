@@ -8,6 +8,8 @@ use tokio::time::sleep;
 use crate::auth::SrpProof;
 use crate::model::{LogicalServer, ProtonLogicalResponse};
 
+const PROTON_LOGICALS_PROTOCOLS: &str = "WireGuardUDP,WireGuardTCP,WireGuardTLS";
+
 #[derive(Clone, Debug)]
 pub struct ProtonApiClient {
     base_url: String,
@@ -34,7 +36,7 @@ impl ProtonApiClient {
         access_token: &str,
         request: &CertificateRequest,
     ) -> Result<CertificateResponse> {
-        let url = format!("{}/vpn/certificate", self.base_url);
+        let url = format!("{}/vpn/v1/certificate", self.base_url);
         send_json_with_retry(|| {
             self.client
                 .post(&url)
@@ -45,13 +47,25 @@ impl ProtonApiClient {
         .context("Proton certificate request failed")
     }
 
-    pub async fn get_logicals(&self, access_token: &str) -> Result<Vec<LogicalServer>> {
-        let url = format!("{}/vpn/logicals", self.base_url);
+    pub async fn get_logicals(
+        &self,
+        access_token: &str,
+        country: Option<&str>,
+        netzone: Option<&str>,
+    ) -> Result<Vec<LogicalServer>> {
+        let url = format!("{}/vpn/v2/logicals", self.base_url);
         Ok(send_json_with_retry::<ProtonLogicalResponse, _>(|| {
-            self.client
-                .get(&url)
-                .bearer_auth(access_token)
-                .query(&[("WithState", "true"), ("Protocols", "wireguard")])
+            let mut builder = self.client.get(&url).bearer_auth(access_token).query(&[
+                ("WithEntriesForProtocols", PROTON_LOGICALS_PROTOCOLS),
+                ("WithState", "true"),
+            ]);
+            if let Some(country) = country {
+                builder = builder.header("x-pm-country", country);
+            }
+            if let Some(netzone) = netzone {
+                builder = builder.header("x-pm-netzone", netzone);
+            }
+            builder
         })
         .await
         .context("Proton logicals request failed")?
@@ -110,11 +124,12 @@ impl ProtonApiClient {
         primary_access_token: &str,
         payload: Option<String>,
     ) -> Result<AuthTokens> {
-        let url = format!("{}/vpn/sessions/fork", self.base_url);
+        let url = format!("{}/auth/v4/sessions/forks", self.base_url);
         let request = SessionForkBody {
+            payload: payload.unwrap_or_default(),
             child_client_id: "ProtonVPN_Linux".into(),
-            is_independent: 1,
-            payload,
+            independent: 1,
+            user_code: None,
         };
 
         send_json_with_retry(|| {
@@ -124,11 +139,11 @@ impl ProtonApiClient {
                 .json(&request)
         })
         .await
-        .context("Proton VPN session fork request failed")
+        .context("Proton session fork request failed")
     }
 
     pub async fn refresh_session(&self, uid: &str, refresh_token: &str) -> Result<AuthTokens> {
-        let url = format!("{}/auth/refresh", self.base_url);
+        let url = format!("{}/auth/v4/refresh", self.base_url);
         let request = RefreshSessionBody {
             uid: uid.to_string(),
             refresh_token: refresh_token.to_string(),
@@ -254,13 +269,15 @@ pub struct AuthTokens {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
 pub struct SessionForkBody {
+    #[serde(rename = "Payload")]
+    pub payload: String,
     #[serde(rename = "ChildClientID")]
     pub child_client_id: String,
-    pub is_independent: u8,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<String>,
+    #[serde(rename = "Independent")]
+    pub independent: u8,
+    #[serde(rename = "UserCode", skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -274,23 +291,33 @@ pub struct RefreshSessionBody {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
 pub struct CertificateRequest {
+    #[serde(rename = "ClientPublicKey")]
     pub client_public_key: String,
-    pub algorithm: String,
-    pub device_model: String,
-    pub purpose: String,
-    pub protocols: Vec<String>,
+    #[serde(rename = "ClientPublicKeyMode")]
+    pub client_public_key_mode: String,
+    #[serde(rename = "DeviceName")]
+    pub device_name: String,
+    #[serde(rename = "Mode")]
+    pub mode: String,
+    #[serde(rename = "Features")]
+    pub features: Vec<String>,
+    #[serde(rename = "Duration", skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
 }
 
 impl CertificateRequest {
-    pub fn wireguard_session(client_public_key: impl Into<String>) -> Self {
+    pub fn wireguard_session(
+        client_public_key: impl Into<String>,
+        device_name: impl Into<String>,
+    ) -> Self {
         Self {
             client_public_key: client_public_key.into(),
-            algorithm: "EC".into(),
-            device_model: "PSO-Rust-Control-Plane".into(),
-            purpose: "session".into(),
-            protocols: Vec::new(),
+            client_public_key_mode: "EC".into(),
+            device_name: device_name.into(),
+            mode: "session".into(),
+            features: Vec::new(),
+            duration: None,
         }
     }
 }
@@ -300,32 +327,62 @@ pub struct CertificateResponse {
     #[serde(alias = "Certificate", alias = "certificate")]
     pub certificate: String,
     #[serde(
+        default,
         alias = "ExpirationTimeMs",
         alias = "expirationTimeMs",
         alias = "expiration_time_ms"
     )]
-    pub expiration_time_ms: u64,
+    expiration_time_ms: Option<u64>,
+    #[serde(default, alias = "ExpirationTime", alias = "expiration_time")]
+    expiration_time: Option<u64>,
     #[serde(
+        default,
         alias = "RefreshTimeMs",
         alias = "refreshTimeMs",
         alias = "refresh_time_ms"
     )]
-    pub refresh_time_ms: u64,
+    refresh_time_ms: Option<u64>,
+    #[serde(default, alias = "RefreshTime", alias = "refresh_time")]
+    refresh_time: Option<u64>,
     #[serde(
+        default,
         alias = "AssignedIP",
         alias = "AssignedIp",
         alias = "assignedIp",
         alias = "assigned_ip"
     )]
-    pub assigned_ip: String,
-    #[serde(alias = "Endpoint", alias = "endpoint")]
+    pub assigned_ip: Option<String>,
+    #[serde(default, alias = "Endpoint", alias = "endpoint")]
     pub endpoint: Option<String>,
     #[serde(
+        default,
         alias = "PeerPublicKey",
         alias = "peerPublicKey",
         alias = "peer_public_key"
     )]
     pub peer_public_key: Option<String>,
+}
+
+impl CertificateResponse {
+    pub fn expiration_time_ms(&self) -> Result<u64> {
+        self.expiration_time_ms
+            .or_else(|| {
+                self.expiration_time
+                    .map(|seconds| seconds.saturating_mul(1000))
+            })
+            .context(
+                "Proton certificate response did not include ExpirationTime or ExpirationTimeMs",
+            )
+    }
+
+    pub fn refresh_time_ms(&self) -> Result<u64> {
+        self.refresh_time_ms
+            .or_else(|| {
+                self.refresh_time
+                    .map(|seconds| seconds.saturating_mul(1000))
+            })
+            .context("Proton certificate response did not include RefreshTime or RefreshTimeMs")
+    }
 }
 
 #[cfg(test)]
@@ -336,27 +393,29 @@ mod tests {
 
     #[test]
     fn serializes_certificate_request_like_proton_client() {
-        let request = CertificateRequest::wireguard_session("public-key");
+        let request = CertificateRequest::wireguard_session("public-key", "PSO-Rust-Control-Plane");
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["ClientPublicKey"], "public-key");
-        assert_eq!(value["Algorithm"], "EC");
-        assert_eq!(value["Purpose"], "session");
+        assert_eq!(value["ClientPublicKeyMode"], "EC");
+        assert_eq!(value["DeviceName"], "PSO-Rust-Control-Plane");
+        assert_eq!(value["Mode"], "session");
+        assert_eq!(value["Features"], json!([]));
     }
 
     #[test]
     fn accepts_common_certificate_response_shapes() {
         let response: CertificateResponse = serde_json::from_value(json!({
             "Certificate": "cert-pem",
-            "ExpirationTimeMs": 2000,
-            "RefreshTimeMs": 1000,
-            "AssignedIP": "10.2.0.2/32",
-            "Endpoint": "203.0.113.10:443"
+            "ExpirationTime": 2,
+            "RefreshTime": 1,
+            "AssignedIP": "10.2.0.2/32"
         }))
         .unwrap();
 
         assert_eq!(response.certificate, "cert-pem");
-        assert_eq!(response.assigned_ip, "10.2.0.2/32");
-        assert_eq!(response.endpoint.as_deref(), Some("203.0.113.10:443"));
+        assert_eq!(response.expiration_time_ms().unwrap(), 2000);
+        assert_eq!(response.refresh_time_ms().unwrap(), 1000);
+        assert_eq!(response.assigned_ip.as_deref(), Some("10.2.0.2/32"));
     }
 
     #[test]
@@ -368,12 +427,15 @@ mod tests {
         assert_eq!(login_info["Username"], "alice@example.com");
 
         let fork = serde_json::to_value(SessionForkBody {
+            payload: "payload".into(),
             child_client_id: "ProtonVPN_Linux".into(),
-            is_independent: 1,
-            payload: Some("payload".into()),
+            independent: 1,
+            user_code: Some("code".into()),
         })
         .unwrap();
         assert_eq!(fork["ChildClientID"], "ProtonVPN_Linux");
-        assert_eq!(fork["IsIndependent"], 1);
+        assert_eq!(fork["Payload"], "payload");
+        assert_eq!(fork["Independent"], 1);
+        assert_eq!(fork["UserCode"], "code");
     }
 }

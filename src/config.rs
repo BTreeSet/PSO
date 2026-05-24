@@ -90,6 +90,8 @@ pub struct ProtonAccountConfig {
 #[serde(default)]
 pub struct TopologyConfig {
     pub account: Option<String>,
+    pub country: Option<String>,
+    pub netzone: Option<String>,
     pub fallback_topology: Option<PathBuf>,
     pub require_live: Option<bool>,
 }

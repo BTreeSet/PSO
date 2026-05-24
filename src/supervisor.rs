@@ -15,7 +15,10 @@ use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::filter::{ServerFilter, select_target};
 use crate::health::{HealthMonitor, HealthStatus, ProbeResult};
 use crate::model::{LogicalServer, PhysicalServer, ProtonLogicalResponse};
-use crate::proton::{CachedAccessToken, ensure_account_access_token};
+use crate::proton::{
+    CachedAccessToken, PROTON_CLIENT_DEVICE_NAME, PROTON_WIREGUARD_KEEPALIVE_INTERVAL,
+    ensure_account_access_token, proton_wireguard_assigned_ips,
+};
 use crate::provider::{
     PROTON_PROVIDER, ProvidersConfig, WireGuardEndpointOverrides, WireGuardServerFilter,
     resolve_wireguard_endpoint, select_wireguard_server,
@@ -59,6 +62,7 @@ pub(crate) struct StaticWireGuardEndpointSpec {
     pub(crate) filter: WireGuardServerFilter,
     pub(crate) local_address: Vec<String>,
     pub(crate) allowed_ips: Vec<String>,
+    pub(crate) pre_shared_key: Option<String>,
     pub(crate) persistent_keepalive_interval: Option<u16>,
     pub(crate) reserved: Option<Vec<u8>>,
     pub(crate) health_proxy_url: Option<String>,
@@ -396,6 +400,7 @@ async fn ensure_static_wireguard_endpoint_state(
         &WireGuardEndpointOverrides {
             local_address: spec.local_address.clone(),
             allowed_ips: spec.allowed_ips.clone(),
+            pre_shared_key: spec.pre_shared_key.clone(),
             persistent_keepalive_interval: spec.persistent_keepalive_interval,
             reserved: spec.reserved.clone(),
         },
@@ -408,6 +413,7 @@ async fn ensure_static_wireguard_endpoint_state(
                 && state.server_id == resolved.server_id
                 && state.endpoint == resolved.endpoint
                 && state.peer_public_key == resolved.peer_public_key
+                && state.pre_shared_key == resolved.pre_shared_key
                 && state.assigned_ips == resolved.assigned_ips
                 && state.allowed_ips == resolved.allowed_ips
                 && state.persistent_keepalive_interval == resolved.persistent_keepalive_interval
@@ -433,6 +439,7 @@ async fn ensure_static_wireguard_endpoint_state(
         server_name: &resolved.server_name,
         endpoint: &resolved.endpoint,
         peer_public_key: &resolved.peer_public_key,
+        pre_shared_key: resolved.pre_shared_key.as_deref(),
         private_key: &key_material.private_key_base64,
         public_key: &key_material.public_key_base64,
         assigned_ips: &resolved.assigned_ips,
@@ -497,11 +504,11 @@ async fn ensure_certificate(
     if !force_refresh && !server_changed && !due {
         if wireguard_state_missing {
             let state = current.as_ref().context("missing outbound cert state")?;
-            let assigned_ip = state
+            let assigned_ips = state
                 .assigned_ip
                 .clone()
-                .context("certificate state is missing assigned IP")?;
-            let assigned_ips = vec![assigned_ip];
+                .map(|assigned_ip| vec![assigned_ip])
+                .unwrap_or_else(proton_wireguard_assigned_ips);
             let allowed_ips = default_allowed_ips();
             store.store_wireguard_endpoint_state(WireGuardEndpointStateUpdate {
                 outbound_tag: &spec.tag,
@@ -511,11 +518,12 @@ async fn ensure_certificate(
                 server_name: &state.server_name,
                 endpoint: &state.endpoint,
                 peer_public_key: &state.peer_public_key,
+                pre_shared_key: None,
                 private_key: &state.private_key,
                 public_key: &state.public_key,
                 assigned_ips: &assigned_ips,
                 allowed_ips: &allowed_ips,
-                persistent_keepalive_interval: Some(25),
+                persistent_keepalive_interval: Some(PROTON_WIREGUARD_KEEPALIVE_INTERVAL),
                 reserved: None,
                 mtu: 1408,
                 expires_at_ms: state.expires_at_ms,
@@ -541,7 +549,10 @@ async fn ensure_certificate(
     };
 
     let api = ProtonApiClient::new(&runtime.context.api_base_url)?;
-    let request = CertificateRequest::wireguard_session(&key_material.public_key_base64);
+    let request = CertificateRequest::wireguard_session(
+        &key_material.public_key_base64,
+        PROTON_CLIENT_DEVICE_NAME,
+    );
     let certificate = match api.get_certificate(access_token, &request).await {
         Ok(certificate) => certificate,
         Err(error) => {
@@ -561,16 +572,22 @@ fn persist_certificate(
     key_material: &KeyMaterial,
     certificate: &CertificateResponse,
 ) -> Result<()> {
-    let endpoint = certificate
-        .endpoint
-        .as_deref()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| endpoint_for_server(server));
-    let peer_public_key = certificate
-        .peer_public_key
+    let endpoint = server.proton_wireguard_endpoint().with_context(|| {
+        format!(
+            "Proton topology entry {} did not include a usable WireGuard endpoint",
+            server.name
+        )
+    })?;
+    let peer_public_key = server
+        .public_key
         .clone()
-        .or(server.public_key.clone())
+        .or(certificate.peer_public_key.clone())
         .context("Proton certificate and server topology did not include peer public key")?;
+    let assigned_ips = proton_wireguard_assigned_ips();
+    let assigned_ip = assigned_ips
+        .first()
+        .cloned()
+        .context("Proton assigned IP defaults are empty")?;
     store.store_outbound_certificate_success(OutboundCertificateUpdate {
         outbound_tag: &spec.tag,
         username,
@@ -580,9 +597,9 @@ fn persist_certificate(
         peer_public_key: &peer_public_key,
         private_key: &key_material.private_key_base64,
         public_key: &key_material.public_key_base64,
-        assigned_ip: &certificate.assigned_ip,
-        expires_at_ms: certificate.expiration_time_ms as i64,
-        refresh_at_ms: certificate.refresh_time_ms as i64,
+        assigned_ip: &assigned_ip,
+        expires_at_ms: certificate.expiration_time_ms()? as i64,
+        refresh_at_ms: certificate.refresh_time_ms()? as i64,
     })
 }
 
@@ -591,7 +608,14 @@ async fn refresh_topology(runtime: &SupervisorRuntime, account_name: &str) -> Re
     let account = runtime.proton_accounts.get_required(account_name)?;
     let token = access_token_for_account(runtime, account_name).await?;
     let api = ProtonApiClient::new(&runtime.context.api_base_url)?;
-    match api.get_logicals(&token).await {
+    match api
+        .get_logicals(
+            &token,
+            runtime.topology.country.as_deref(),
+            runtime.topology.netzone.as_deref(),
+        )
+        .await
+    {
         Ok(logicals) => {
             let value = json!({ "LogicalServers": logicals });
             let text = serde_json::to_string_pretty(&value)?;
@@ -687,14 +711,6 @@ fn endpoint_username(runtime: &SupervisorRuntime, spec: &EndpointSpec) -> Option
             .map(|account| account.username.clone()),
         EndpointSpec::StaticWireGuard(_) => None,
     }
-}
-
-fn endpoint_for_server(server: &PhysicalServer) -> String {
-    server
-        .entry_ip
-        .clone()
-        .or_else(|| server.domain.clone())
-        .unwrap_or_else(|| server.name.clone())
 }
 
 fn stable_server_id(server: &PhysicalServer) -> String {

@@ -185,6 +185,7 @@ fn parse_static_spec(
     };
     let local_address = optional_string_array(object, "local_address")?;
     let allowed_ips = optional_string_array(object, "allowed_ips")?;
+    let pre_shared_key = optional_string(object, "pre_shared_key")?;
     let persistent_keepalive_interval = object
         .get("persistent_keepalive_interval")
         .and_then(Value::as_u64)
@@ -209,6 +210,7 @@ fn parse_static_spec(
         filter,
         local_address,
         allowed_ips,
+        pre_shared_key,
         persistent_keepalive_interval,
         reserved,
         health_proxy_url,
@@ -340,6 +342,7 @@ fn apply_wireguard_endpoint_state(
     object.remove("allowed_ips");
     object.remove("reserved");
     object.remove("peer_public_key");
+    object.remove("pre_shared_key");
     object.entry("system").or_insert(Value::Bool(false));
     object
         .entry("mtu")
@@ -365,6 +368,9 @@ fn apply_wireguard_endpoint_state(
         "public_key": state.peer_public_key,
         "allowed_ips": state.allowed_ips
     });
+    if let Some(pre_shared_key) = &state.pre_shared_key {
+        peer["pre_shared_key"] = Value::String(pre_shared_key.clone());
+    }
     if let Some(keepalive) = state.persistent_keepalive_interval {
         peer["persistent_keepalive_interval"] = Value::Number(keepalive.into());
     }
@@ -394,6 +400,15 @@ fn optional_string_array(object: &Map<String, Value>, key: &str) -> Result<Vec<S
             })
             .collect(),
         Some(_) => anyhow::bail!("{key} must be a string or string array"),
+    }
+}
+
+fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<String>> {
+    match object.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => anyhow::bail!("{key} must be a string"),
     }
 }
 

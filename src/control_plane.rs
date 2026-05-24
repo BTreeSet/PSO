@@ -12,6 +12,9 @@ use crate::api::{CertificateRequest, ProtonApiClient};
 use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::model::PhysicalServer;
 use crate::process::sighup_process;
+use crate::proton::{
+    PROTON_CLIENT_DEVICE_NAME, PROTON_WIREGUARD_KEEPALIVE_INTERVAL, proton_wireguard_assigned_ips,
+};
 use crate::scheduler::{RefreshDecision, RefreshScheduler};
 use crate::singbox_adapter::build_wireguard_endpoint;
 
@@ -50,7 +53,10 @@ impl ControlPlane {
         let mut refresh_count = 0;
 
         loop {
-            let request = CertificateRequest::wireguard_session(&key_material.public_key_base64);
+            let request = CertificateRequest::wireguard_session(
+                &key_material.public_key_base64,
+                PROTON_CLIENT_DEVICE_NAME,
+            );
             let result = self
                 .api
                 .get_certificate(&config.access_token, &request)
@@ -59,11 +65,24 @@ impl ControlPlane {
 
             let decision = match result {
                 Ok(certificate) => {
+                    let endpoint = config
+                        .selected_server
+                        .proton_wireguard_endpoint()
+                        .context("selected server has no Proton WireGuard endpoint")?;
+                    let peer_public_key = config
+                        .selected_server
+                        .public_key
+                        .clone()
+                        .context("selected server has no WireGuard peer public key")?;
+                    let address = proton_wireguard_assigned_ips();
                     let outbound = build_wireguard_endpoint(
                         &config.outbound_tag,
                         &key_material,
-                        &certificate,
-                        &config.selected_server,
+                        &endpoint,
+                        &peer_public_key,
+                        &address,
+                        Some(PROTON_WIREGUARD_KEEPALIVE_INTERVAL),
+                        None,
                     )?;
                     write_singbox_config(
                         &config.active_config,
@@ -71,11 +90,11 @@ impl ControlPlane {
                     )?;
                     sighup_process(config.singbox_pid)?;
 
-                    expires_at_ms = certificate.expiration_time_ms;
+                    expires_at_ms = certificate.expiration_time_ms()?;
                     refresh_count = 0;
                     info!(tag = %config.outbound_tag, "certificate refreshed and sing-box reloaded");
                     self.scheduler
-                        .next_after_success(now_ms, certificate.refresh_time_ms)
+                        .next_after_success(now_ms, certificate.refresh_time_ms()?)
                 }
                 Err(error) => {
                     refresh_count += 1;
@@ -102,23 +121,39 @@ impl ControlPlane {
         config: &ControlPlaneConfig,
     ) -> Result<CertificateRefreshOutcome> {
         let key_material = generate_key_material();
-        let request = CertificateRequest::wireguard_session(&key_material.public_key_base64);
+        let request = CertificateRequest::wireguard_session(
+            &key_material.public_key_base64,
+            PROTON_CLIENT_DEVICE_NAME,
+        );
         let certificate = self
             .api
             .get_certificate(&config.access_token, &request)
             .await?;
+        let endpoint = config
+            .selected_server
+            .proton_wireguard_endpoint()
+            .context("selected server has no Proton WireGuard endpoint")?;
+        let peer_public_key = config
+            .selected_server
+            .public_key
+            .clone()
+            .context("selected server has no WireGuard peer public key")?;
+        let address = proton_wireguard_assigned_ips();
         let outbound = build_wireguard_endpoint(
             &config.outbound_tag,
             &key_material,
-            &certificate,
-            &config.selected_server,
+            &endpoint,
+            &peer_public_key,
+            &address,
+            Some(PROTON_WIREGUARD_KEEPALIVE_INTERVAL),
+            None,
         )?;
         write_singbox_config(&config.active_config, &json!({ "endpoints": [outbound] }))?;
         sighup_process(config.singbox_pid)?;
         info!(tag = %config.outbound_tag, "certificate refreshed and sing-box reloaded");
         Ok(CertificateRefreshOutcome {
-            expiration_time_ms: certificate.expiration_time_ms,
-            refresh_time_ms: certificate.refresh_time_ms,
+            expiration_time_ms: certificate.expiration_time_ms()?,
+            refresh_time_ms: certificate.refresh_time_ms()?,
         })
     }
 }

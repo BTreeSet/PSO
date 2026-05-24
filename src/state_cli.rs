@@ -19,13 +19,13 @@ pub fn run_state(context: &RuntimeContext, args: StateArgs) -> Result<()> {
 }
 
 fn print_accounts(rows: &[AccountRow]) -> Result<()> {
-    println!("updated_at\taccount_key\thas_vpn_session\tusername");
+    println!("updated_at\taccount_key\thas_proton_session\tusername");
     for row in rows {
         println!(
             "{}\t{}\t{}\t{}",
             row.updated_at,
             shorten(&row.account_key),
-            row.has_vpn_session,
+            row.has_proton_session,
             row.username
         );
     }

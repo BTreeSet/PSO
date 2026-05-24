@@ -4,7 +4,7 @@ This roadmap lists technical directions that fit PSO's goal: automatic `sing-box
 
 ## Near Term
 
-- State directory ownership: keep generated and persistent runtime state under one opaque state directory. SQLite owns VPN session state, certificate metadata, runtime events, and health history; raw topology remains as JSON for provider troubleshooting.
+- State directory ownership: keep generated and persistent runtime state under one opaque state directory. SQLite owns Proton auth-session state, certificate metadata, runtime events, and health history; raw topology remains as JSON for provider troubleshooting.
 - Account lifecycle hardening: add richer batch account maintenance flows, clearer human-verification retry handling, and more explicit session-expiry observability.
 - Multi-endpoint daemon loop hardening: extend the current supervisor with server reselection policy, per-endpoint backoff tuning, and graceful shutdown.
 - Health-driven recovery: combine Cloudflare/ipinfo probe results with endpoint certificate state to reselect servers when a refreshed endpoint remains dead or leaking.

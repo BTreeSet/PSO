@@ -20,8 +20,8 @@ use pso::health::HealthMonitor;
 use pso::model::{PhysicalServer, ProtonLogicalResponse};
 use pso::process::{find_process_pid, find_process_pid_by_exe};
 use pso::proton::{
-    CachedAccessToken, login_configured_account, login_with_prompts, persist_vpn_session,
-    refresh_stored_vpn_session,
+    CachedAccessToken, login_configured_account, login_with_prompts, persist_proton_session,
+    refresh_stored_proton_session,
 };
 use pso::provider::known_wireguard_providers;
 use pso::state::{StateStore, topology_state_file, write_state_file};
@@ -212,6 +212,7 @@ async fn control_plane(
                 name: String::new(),
                 entry_ip: Some(endpoint),
                 entry_ipv6: None,
+                entry_per_protocol: Default::default(),
                 exit_ip: None,
                 domain: None,
                 label: None,
@@ -242,7 +243,14 @@ async fn fetch_logicals(
         .as_ref()
         .or(config.fallback_topology.as_ref());
     let require_live = args.require_live || config.require_live.unwrap_or(false);
-    match api.get_logicals(&access_token).await {
+    match api
+        .get_logicals(
+            &access_token,
+            config.country.as_deref(),
+            config.netzone.as_deref(),
+        )
+        .await
+    {
         Ok(logicals) => {
             let value = serde_json::json!({ "LogicalServers": logicals });
             let text = serde_json::to_string_pretty(&value)?;
@@ -270,20 +278,20 @@ fn write_logicals_from_available_state(
     let source = match fallback_topology {
         Some(path) if path.exists() => {
             eprintln!(
-                "warning: /vpn/logicals fetch failed, using fallback topology from {}: {error:#}",
+                "warning: /vpn/v2/logicals fetch failed, using fallback topology from {}: {error:#}",
                 path.display()
             );
             path
         }
         _ if state_logicals.exists() => {
             eprintln!(
-                "warning: /vpn/logicals fetch failed, using topology state from {}: {error:#}",
+                "warning: /vpn/v2/logicals fetch failed, using topology state from {}: {error:#}",
                 state_logicals.display()
             );
             state_logicals
         }
         Some(path) => anyhow::bail!(
-            "/vpn/logicals fetch failed and fallback topology {} does not exist: {error:#}",
+            "/vpn/v2/logicals fetch failed and fallback topology {} does not exist: {error:#}",
             path.display()
         ),
         None => return Err(error),
@@ -297,10 +305,10 @@ fn write_logicals_from_available_state(
 
 async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -> Result<()> {
     let registry = ProtonAccountRegistry::from_auth(config)?;
-    let vpn = if let Some(account_name) = args.account.as_deref() {
+    let session = if let Some(account_name) = args.account.as_deref() {
         let account = registry.get_required(account_name)?;
         ensure_username_matches_account(args.username.as_deref(), account)?;
-        let vpn = login_configured_account(
+        let session = login_configured_account(
             context,
             account,
             args.password,
@@ -308,11 +316,11 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
             args.human_verification_token.as_deref(),
         )
         .await?;
-        persist_vpn_session(context, &account.username, None, &vpn)?;
-        vpn
+        persist_proton_session(context, &account.username, None, &session)?;
+        session
     } else if let Some(username) = args.username {
         if let Some(account) = registry.get_by_username(&username) {
-            let vpn = login_configured_account(
+            let session = login_configured_account(
                 context,
                 account,
                 args.password,
@@ -320,11 +328,11 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
                 args.human_verification_token.as_deref(),
             )
             .await?;
-            persist_vpn_session(context, &account.username, None, &vpn)?;
-            vpn
+            persist_proton_session(context, &account.username, None, &session)?;
+            session
         } else {
             let password = resolve_cli_password(args.password, args.password_file, args.no_prompt)?;
-            let vpn = login_with_prompts(
+            let session = login_with_prompts(
                 context,
                 &username,
                 password,
@@ -333,15 +341,15 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
                 args.human_verification_token.as_deref(),
             )
             .await?;
-            persist_vpn_session(context, &username, None, &vpn)?;
-            vpn
+            persist_proton_session(context, &username, None, &session)?;
+            session
         }
     } else if registry.len() == 1 {
         let account = registry
             .iter()
             .next()
             .context("missing configured Proton account")?;
-        let vpn = login_configured_account(
+        let session = login_configured_account(
             context,
             account,
             args.password,
@@ -349,16 +357,16 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
             args.human_verification_token.as_deref(),
         )
         .await?;
-        persist_vpn_session(context, &account.username, None, &vpn)?;
-        vpn
+        persist_proton_session(context, &account.username, None, &session)?;
+        session
     } else {
         anyhow::bail!("a Proton account is required; pass --account or --username")
     };
 
     if let Some(output) = args.output {
-        write_json_output(&output, &vpn)?;
+        write_json_output(&output, &session)?;
     } else {
-        println!("{}", serde_json::to_string_pretty(&vpn)?);
+        println!("{}", serde_json::to_string_pretty(&session)?);
     }
 
     Ok(())
@@ -385,9 +393,9 @@ async fn refresh_vpn_token(
         anyhow::bail!("a Proton account is required; pass --account or --username")
     };
     let store = StateStore::open(context)?;
-    let state = store.load_vpn_session(&username)?;
-    let refreshed = refresh_stored_vpn_session(context, &state).await?;
-    persist_vpn_session(context, &username, Some(&state.uid), &refreshed)?;
+    let state = store.load_proton_session(&username)?;
+    let refreshed = refresh_stored_proton_session(context, &state).await?;
+    persist_proton_session(context, &username, Some(&state.uid), &refreshed)?;
 
     if let Some(output) = args.output {
         write_json_output(&output, &refreshed)?;

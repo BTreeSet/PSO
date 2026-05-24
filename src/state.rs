@@ -7,11 +7,12 @@ use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use sha2::{Digest, Sha256};
 
 use crate::config::RuntimeContext;
+use crate::proton::PROTON_WIREGUARD_KEEPALIVE_INTERVAL;
 use crate::provider::PROTON_PROVIDER;
 use crate::singbox_adapter::default_allowed_ips;
 pub use crate::state_model::{
     AccountRow, CertificateRow, HealthCheckRow, HealthRecord, OutboundCertificateState,
-    OutboundCertificateUpdate, RuntimeEventRow, VpnSessionState, WireGuardEndpointRow,
+    OutboundCertificateUpdate, ProtonSessionState, RuntimeEventRow, WireGuardEndpointRow,
     WireGuardEndpointState, WireGuardEndpointStateUpdate,
 };
 
@@ -29,7 +30,12 @@ impl StateStore {
         Ok(store)
     }
 
-    pub fn store_vpn_session(&self, username: &str, uid: &str, refresh_token: &str) -> Result<()> {
+    pub fn store_proton_session(
+        &self,
+        username: &str,
+        uid: &str,
+        refresh_token: &str,
+    ) -> Result<()> {
         let account_key = user_state_key(username);
         let now = unix_timestamp()?;
         self.upsert_account(&account_key, username, now)?;
@@ -42,24 +48,24 @@ impl StateStore {
                updated_at = excluded.updated_at",
             params![account_key, uid, refresh_token, now],
         )?;
-        self.record_event(Some(username), None, "vpn_session_updated", None)
+        self.record_event(Some(username), None, "proton_session_updated", None)
     }
 
-    pub fn load_vpn_session(&self, username: &str) -> Result<VpnSessionState> {
+    pub fn load_proton_session(&self, username: &str) -> Result<ProtonSessionState> {
         let account_key = user_state_key(username);
         self.connection
             .query_row(
                 "SELECT uid, refresh_token FROM vpn_sessions WHERE account_key = ?1",
                 params![account_key],
                 |row| {
-                    Ok(VpnSessionState {
+                    Ok(ProtonSessionState {
                         uid: row.get(0)?,
                         refresh_token: row.get(1)?,
                     })
                 },
             )
             .optional()?
-            .with_context(|| format!("VPN session state was not found for {username}"))
+            .with_context(|| format!("Proton session state was not found for {username}"))
     }
 
     pub fn record_event(
@@ -117,16 +123,16 @@ impl StateStore {
         self.connection
             .query_row(
                 "SELECT outbound_tag, provider, identity, server_id, server_name, endpoint,
-                        peer_public_key, private_key, public_key, assigned_ips_json,
-                        allowed_ips_json, persistent_keepalive_interval, reserved_json, mtu,
-                        expires_at_ms, refresh_at_ms, updated_at
+                        peer_public_key, pre_shared_key, private_key, public_key,
+                        assigned_ips_json, allowed_ips_json, persistent_keepalive_interval,
+                        reserved_json, mtu, expires_at_ms, refresh_at_ms, updated_at
                  FROM wireguard_endpoint_states
                  WHERE outbound_tag = ?1",
                 params![outbound_tag],
                 |row| {
-                    let assigned_ips_json: String = row.get(9)?;
-                    let allowed_ips_json: String = row.get(10)?;
-                    let reserved_json: Option<String> = row.get(12)?;
+                    let assigned_ips_json: String = row.get(10)?;
+                    let allowed_ips_json: String = row.get(11)?;
+                    let reserved_json: Option<String> = row.get(13)?;
                     Ok(WireGuardEndpointState {
                         outbound_tag: row.get(0)?,
                         provider: row.get(1)?,
@@ -135,19 +141,20 @@ impl StateStore {
                         server_name: row.get(4)?,
                         endpoint: row.get(5)?,
                         peer_public_key: row.get(6)?,
-                        private_key: row.get(7)?,
-                        public_key: row.get(8)?,
-                        assigned_ips: decode_json_column(&assigned_ips_json, 9)?,
-                        allowed_ips: decode_json_column(&allowed_ips_json, 10)?,
-                        persistent_keepalive_interval: row.get(11)?,
+                        pre_shared_key: row.get(7)?,
+                        private_key: row.get(8)?,
+                        public_key: row.get(9)?,
+                        assigned_ips: decode_json_column(&assigned_ips_json, 10)?,
+                        allowed_ips: decode_json_column(&allowed_ips_json, 11)?,
+                        persistent_keepalive_interval: row.get(12)?,
                         reserved: reserved_json
                             .as_deref()
-                            .map(|json| decode_json_column(json, 12))
+                            .map(|json| decode_json_column(json, 13))
                             .transpose()?,
-                        mtu: row.get(13)?,
-                        expires_at_ms: row.get(14)?,
-                        refresh_at_ms: row.get(15)?,
-                        updated_at: row.get(16)?,
+                        mtu: row.get(14)?,
+                        expires_at_ms: row.get(15)?,
+                        refresh_at_ms: row.get(16)?,
+                        updated_at: row.get(17)?,
                     })
                 },
             )
@@ -262,11 +269,12 @@ impl StateStore {
             server_name: update.server_name,
             endpoint: update.endpoint,
             peer_public_key: update.peer_public_key,
+            pre_shared_key: None,
             private_key: update.private_key,
             public_key: update.public_key,
             assigned_ips: &assigned_ips,
             allowed_ips: &allowed_ips,
-            persistent_keepalive_interval: Some(25),
+            persistent_keepalive_interval: Some(PROTON_WIREGUARD_KEEPALIVE_INTERVAL),
             reserved: None,
             mtu: 1408,
             expires_at_ms: Some(update.expires_at_ms),
@@ -343,7 +351,7 @@ impl StateStore {
                 account_key: row.get(0)?,
                 username: row.get(1)?,
                 updated_at: row.get(2)?,
-                has_vpn_session: row.get(3)?,
+                has_proton_session: row.get(3)?,
             })
         })?;
         collect_rows(rows)
@@ -463,10 +471,10 @@ impl StateStore {
         self.connection.execute(
             "INSERT INTO wireguard_endpoint_states
                (outbound_tag, provider, identity, server_id, server_name, endpoint,
-                peer_public_key, private_key, public_key, assigned_ips_json, allowed_ips_json,
-                persistent_keepalive_interval, reserved_json, mtu, expires_at_ms, refresh_at_ms,
-                updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                     peer_public_key, pre_shared_key, private_key, public_key, assigned_ips_json,
+                     allowed_ips_json, persistent_keepalive_interval, reserved_json, mtu,
+                     expires_at_ms, refresh_at_ms, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(outbound_tag) DO UPDATE SET
                provider = excluded.provider,
                identity = excluded.identity,
@@ -474,6 +482,7 @@ impl StateStore {
                server_name = excluded.server_name,
                endpoint = excluded.endpoint,
                peer_public_key = excluded.peer_public_key,
+                    pre_shared_key = excluded.pre_shared_key,
                private_key = excluded.private_key,
                public_key = excluded.public_key,
                assigned_ips_json = excluded.assigned_ips_json,
@@ -492,6 +501,7 @@ impl StateStore {
                 update.server_name,
                 update.endpoint,
                 update.peer_public_key,
+                update.pre_shared_key,
                 update.private_key,
                 update.public_key,
                 assigned_ips_json,
@@ -574,6 +584,7 @@ impl StateStore {
                              server_name TEXT NOT NULL,
                              endpoint TEXT NOT NULL,
                              peer_public_key TEXT NOT NULL,
+                             pre_shared_key TEXT,
                              private_key TEXT NOT NULL,
                              public_key TEXT NOT NULL,
                              assigned_ips_json TEXT NOT NULL,
@@ -596,6 +607,7 @@ impl StateStore {
                          CREATE INDEX IF NOT EXISTS idx_config_deployments_time
                              ON config_deployments(deployed_at);",
         )?;
+        self.ensure_text_column("wireguard_endpoint_states", "pre_shared_key")?;
         Ok(())
     }
 
@@ -617,6 +629,23 @@ fn collect_rows<T>(
 ) -> Result<Vec<T>> {
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+impl StateStore {
+    fn ensure_text_column(&self, table: &str, column: &str) -> Result<()> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut statement = self.connection.prepare(&pragma)?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let exists = columns
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .any(|name| name == column);
+        if !exists {
+            let alter = format!("ALTER TABLE {table} ADD COLUMN {column} TEXT");
+            self.connection.execute(&alter, [])?;
+        }
+        Ok(())
+    }
 }
 
 fn decode_json_column<T: serde::de::DeserializeOwned>(
@@ -678,9 +707,9 @@ mod tests {
         let store = StateStore::open(&context).unwrap();
 
         store
-            .store_vpn_session("alice@example.com", "uid", "refresh")
+            .store_proton_session("alice@example.com", "uid", "refresh")
             .unwrap();
-        let session = store.load_vpn_session("alice@example.com").unwrap();
+        let session = store.load_proton_session("alice@example.com").unwrap();
         assert_eq!(session.uid, "uid");
         assert_eq!(session.refresh_token, "refresh");
 

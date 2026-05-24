@@ -3,6 +3,7 @@ use serde_json::{Map, Value, json};
 
 use crate::filter::{ServerFilter, select_target};
 use crate::model::LogicalServer;
+use crate::proton::PROTON_WIREGUARD_KEEPALIVE_INTERVAL;
 use crate::provisioning::WireGuardProvisioner;
 use crate::session::SessionStore;
 
@@ -79,7 +80,7 @@ fn hydrate_outbound(
             "port": credentials.peer_port,
             "public_key": credentials.peer_public_key,
             "allowed_ips": credentials.allowed_ips,
-            "persistent_keepalive_interval": 25
+            "persistent_keepalive_interval": PROTON_WIREGUARD_KEEPALIVE_INTERVAL
         }]),
     );
 
@@ -133,6 +134,7 @@ mod tests {
                     name: "jp-physical".into(),
                     entry_ip: Some("198.51.100.10".into()),
                     entry_ipv6: None,
+                    entry_per_protocol: Default::default(),
                     exit_ip: None,
                     domain: None,
                     label: None,

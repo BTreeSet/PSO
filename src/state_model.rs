@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct VpnSessionState {
+pub struct ProtonSessionState {
     pub uid: String,
     pub refresh_token: String,
 }
@@ -11,7 +11,7 @@ pub struct AccountRow {
     pub account_key: String,
     pub username: String,
     pub updated_at: i64,
-    pub has_vpn_session: bool,
+    pub has_proton_session: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -92,6 +92,7 @@ pub struct WireGuardEndpointState {
     pub server_name: String,
     pub endpoint: String,
     pub peer_public_key: String,
+    pub pre_shared_key: Option<String>,
     pub private_key: String,
     pub public_key: String,
     pub assigned_ips: Vec<String>,
@@ -113,6 +114,7 @@ pub struct WireGuardEndpointStateUpdate<'a> {
     pub server_name: &'a str,
     pub endpoint: &'a str,
     pub peer_public_key: &'a str,
+    pub pre_shared_key: Option<&'a str>,
     pub private_key: &'a str,
     pub public_key: &'a str,
     pub assigned_ips: &'a [String],

@@ -16,12 +16,17 @@ pub const KNOWN_WIREGUARD_PROVIDERS: &[KnownWireGuardProvider] = &[
     KnownWireGuardProvider {
         name: "proton",
         mode: "dynamic-api",
-        notes: "Proton SRP auth, VPN session refresh, logical topology fetch, and certificate registration are implemented natively.",
+        notes: "Proton SRP auth, stored auth-session refresh, logical topology fetch, and certificate registration are implemented natively.",
     },
     KnownWireGuardProvider {
         name: "airvpn",
         mode: "static-wireguard-catalog",
-        notes: "Declare AirVPN WireGuard endpoints, including the provider's non-default port and assigned tunnel addresses, in providers.wireguard.",
+        notes: "Declare AirVPN WireGuard endpoints, including pre_shared_key, non-default port, and assigned tunnel addresses, in providers.wireguard.",
+    },
+    KnownWireGuardProvider {
+        name: "cyberghost",
+        mode: "static-wireguard-catalog",
+        notes: "Declare provider-issued WireGuard endpoint metadata using the shared static catalog schema; this matches Gluetun's custom-provider WireGuard path.",
     },
     KnownWireGuardProvider {
         name: "fastestvpn",
@@ -44,9 +49,44 @@ pub const KNOWN_WIREGUARD_PROVIDERS: &[KnownWireGuardProvider] = &[
         notes: "Declare NordLynx/WireGuard endpoint metadata, including per-server peer public keys, from provider-issued configuration.",
     },
     KnownWireGuardProvider {
+        name: "perfectprivacy",
+        mode: "static-wireguard-catalog",
+        notes: "Declare provider-issued WireGuard endpoint metadata through the shared static catalog schema; automatic provider-side port forwarding is not implemented yet.",
+    },
+    KnownWireGuardProvider {
+        name: "privateinternetaccess",
+        mode: "static-wireguard-catalog",
+        notes: "Declare provider-issued WireGuard endpoint metadata through the shared static catalog schema; automatic provider-side port forwarding is not implemented yet.",
+    },
+    KnownWireGuardProvider {
+        name: "privatevpn",
+        mode: "static-wireguard-catalog",
+        notes: "Declare provider-issued WireGuard endpoint metadata through the shared static catalog schema; automatic provider-side port forwarding is not implemented yet.",
+    },
+    KnownWireGuardProvider {
+        name: "purevpn",
+        mode: "static-wireguard-catalog",
+        notes: "Declare provider-issued WireGuard endpoint metadata using the shared static catalog schema; this matches Gluetun's custom-provider WireGuard path.",
+    },
+    KnownWireGuardProvider {
         name: "surfshark",
         mode: "dynamic-catalog",
         notes: "Supports automatic Surfshark public WireGuard catalog refresh or a static fallback catalog for pinned provider metadata.",
+    },
+    KnownWireGuardProvider {
+        name: "torguard",
+        mode: "static-wireguard-catalog",
+        notes: "Declare provider-issued WireGuard endpoint metadata using the shared static catalog schema; this matches Gluetun's custom-provider WireGuard path.",
+    },
+    KnownWireGuardProvider {
+        name: "vpnunlimited",
+        mode: "static-wireguard-catalog",
+        notes: "Declare provider-issued WireGuard endpoint metadata using the shared static catalog schema; this matches Gluetun's custom-provider WireGuard path.",
+    },
+    KnownWireGuardProvider {
+        name: "vyprvpn",
+        mode: "static-wireguard-catalog",
+        notes: "Declare provider-issued WireGuard endpoint metadata using the shared static catalog schema; this matches Gluetun's custom-provider WireGuard path.",
     },
     KnownWireGuardProvider {
         name: "windscribe",
@@ -133,6 +173,7 @@ pub struct WireGuardProviderConfig {
     pub default_port: Option<u16>,
     pub local_address: Vec<String>,
     pub allowed_ips: Vec<String>,
+    pub pre_shared_key: Option<String>,
     pub persistent_keepalive_interval: Option<u16>,
     pub servers: Vec<WireGuardServerConfig>,
 }
@@ -145,6 +186,7 @@ impl Default for WireGuardProviderConfig {
             default_port: Some(51820),
             local_address: Vec::new(),
             allowed_ips: default_allowed_ips(),
+            pre_shared_key: None,
             persistent_keepalive_interval: Some(25),
             servers: Vec::new(),
         }
@@ -162,6 +204,7 @@ pub struct WireGuardServerConfig {
     pub endpoint: Option<String>,
     pub endpoint_port: Option<u16>,
     pub public_key: Option<String>,
+    pub pre_shared_key: Option<String>,
     pub load: Option<u8>,
     pub status: Option<i32>,
     pub features: Vec<String>,
@@ -259,6 +302,7 @@ pub enum WireGuardSortMode {
 pub struct WireGuardEndpointOverrides {
     pub local_address: Vec<String>,
     pub allowed_ips: Vec<String>,
+    pub pre_shared_key: Option<String>,
     pub persistent_keepalive_interval: Option<u16>,
     pub reserved: Option<Vec<u8>>,
 }
@@ -270,6 +314,7 @@ pub struct WireGuardEndpointResolution {
     pub server_name: String,
     pub endpoint: String,
     pub peer_public_key: String,
+    pub pre_shared_key: Option<String>,
     pub assigned_ips: Vec<String>,
     pub allowed_ips: Vec<String>,
     pub persistent_keepalive_interval: Option<u16>,
@@ -353,6 +398,15 @@ pub fn resolve_wireguard_endpoint(
         .public_key
         .clone()
         .context("WireGuard server is missing public_key")?;
+    let pre_shared_key = [
+        overrides.pre_shared_key.as_deref(),
+        server.pre_shared_key.as_deref(),
+        provider.pre_shared_key.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| !value.trim().is_empty())
+    .map(ToOwned::to_owned);
     let assigned_ips = first_non_empty([
         overrides.local_address.as_slice(),
         server.local_address.as_slice(),
@@ -389,6 +443,7 @@ pub fn resolve_wireguard_endpoint(
         server_name: server.display_name(),
         endpoint,
         peer_public_key,
+        pre_shared_key,
         assigned_ips,
         allowed_ips,
         persistent_keepalive_interval: overrides
@@ -527,6 +582,7 @@ mod tests {
         let provider = WireGuardProviderConfig {
             name: "mullvad".into(),
             local_address: vec!["10.64.10.2/32".into()],
+            pre_shared_key: Some("provider-psk".into()),
             servers: vec![WireGuardServerConfig {
                 id: Some("se1".into()),
                 name: Some("SE Stockholm 1".into()),
@@ -553,6 +609,7 @@ mod tests {
 
         assert_eq!(resolved.endpoint, "198.51.100.10:51820");
         assert_eq!(resolved.assigned_ips, vec!["10.64.10.2/32"]);
+        assert_eq!(resolved.pre_shared_key.as_deref(), Some("provider-psk"));
         assert_eq!(resolved.reserved, Some(vec![1, 2, 3]));
     }
 

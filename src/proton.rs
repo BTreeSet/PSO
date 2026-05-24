@@ -4,9 +4,12 @@ use crate::accounts::ProtonAccount;
 use crate::api::{AuthTokens, ProtonApiClient};
 use crate::auth::{calculate_srp_proof, resolve_two_factor_code};
 use crate::config::RuntimeContext;
-use crate::state::{StateStore, VpnSessionState};
+use crate::state::{ProtonSessionState, StateStore};
 
 const ACCESS_TOKEN_REFRESH_MARGIN_MS: i64 = 60_000;
+pub const PROTON_CLIENT_DEVICE_NAME: &str = "PSO-Rust-Control-Plane";
+pub const PROTON_WIREGUARD_ADDRESS_V4: &str = "10.2.0.2/32";
+pub const PROTON_WIREGUARD_KEEPALIVE_INTERVAL: u16 = 60;
 
 #[derive(Clone, Debug, Default)]
 pub struct CachedAccessToken {
@@ -75,7 +78,7 @@ pub async fn login_with_prompts(
             human_verification_token,
         )
         .await?;
-    api.fork_vpn_session(&primary.access_token, None).await
+    Ok(primary)
 }
 
 pub async fn login_configured_account(
@@ -111,15 +114,15 @@ pub async fn login_configured_account(
     .await
 }
 
-pub async fn refresh_stored_vpn_session(
+pub async fn refresh_stored_proton_session(
     context: &RuntimeContext,
-    state: &VpnSessionState,
+    state: &ProtonSessionState,
 ) -> Result<AuthTokens> {
     let api = ProtonApiClient::new(&context.api_base_url)?;
     api.refresh_session(&state.uid, &state.refresh_token).await
 }
 
-pub fn persist_vpn_session(
+pub fn persist_proton_session(
     context: &RuntimeContext,
     username: &str,
     state_uid: Option<&str>,
@@ -130,7 +133,7 @@ pub fn persist_vpn_session(
         .as_deref()
         .or(state_uid)
         .context("Proton token response did not include UID for session state")?;
-    StateStore::open(context)?.store_vpn_session(username, uid, &tokens.refresh_token)
+    StateStore::open(context)?.store_proton_session(username, uid, &tokens.refresh_token)
 }
 
 pub async fn ensure_account_access_token(
@@ -143,10 +146,10 @@ pub async fn ensure_account_access_token(
     }
 
     let store = StateStore::open(context)?;
-    match store.load_vpn_session(&account.username) {
-        Ok(state) => match refresh_stored_vpn_session(context, &state).await {
+    match store.load_proton_session(&account.username) {
+        Ok(state) => match refresh_stored_proton_session(context, &state).await {
             Ok(tokens) => {
-                persist_vpn_session(context, &account.username, Some(&state.uid), &tokens)?;
+                persist_proton_session(context, &account.username, Some(&state.uid), &tokens)?;
                 cache.store(&tokens);
                 Ok(tokens.access_token)
             }
@@ -162,7 +165,7 @@ pub async fn ensure_account_access_token(
                             account.name
                         )
                     })?;
-                persist_vpn_session(context, &account.username, None, &tokens)?;
+                persist_proton_session(context, &account.username, None, &tokens)?;
                 cache.store(&tokens);
                 Ok(tokens.access_token)
             }
@@ -172,7 +175,7 @@ pub async fn ensure_account_access_token(
                 account.ensure_can_login_headless()?;
             }
             let tokens = login_configured_account(context, account, None, None, None).await?;
-            persist_vpn_session(context, &account.username, None, &tokens)?;
+            persist_proton_session(context, &account.username, None, &tokens)?;
             cache.store(&tokens);
             Ok(tokens.access_token)
         }
@@ -184,4 +187,8 @@ fn current_time_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+pub fn proton_wireguard_assigned_ips() -> Vec<String> {
+    vec![PROTON_WIREGUARD_ADDRESS_V4.to_string()]
 }

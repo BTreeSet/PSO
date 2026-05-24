@@ -1,9 +1,7 @@
 use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::api::CertificateResponse;
 use crate::crypto::KeyMaterial;
-use crate::model::PhysicalServer;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct SingboxWireGuardEndpoint {
@@ -14,52 +12,59 @@ pub struct SingboxWireGuardEndpoint {
     pub mtu: u16,
     pub address: Vec<String>,
     pub private_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
     pub peers: Vec<SingboxWireGuardPeer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp_timeout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workers: Option<i32>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct SingboxWireGuardPeer {
     pub address: String,
     pub port: u16,
     pub public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_shared_key: Option<String>,
     pub allowed_ips: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persistent_keepalive_interval: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserved: Option<Vec<u8>>,
 }
 
 pub fn build_wireguard_endpoint(
     tag: impl Into<String>,
     key_material: &KeyMaterial,
-    certificate: &CertificateResponse,
-    selected_server: &PhysicalServer,
+    endpoint: &str,
+    peer_public_key: &str,
+    address: &[String],
+    persistent_keepalive_interval: Option<u16>,
+    reserved: Option<&[u8]>,
 ) -> Result<SingboxWireGuardEndpoint> {
-    let endpoint = certificate
-        .endpoint
-        .as_deref()
-        .or(selected_server.entry_ip.as_deref())
-        .or(selected_server.domain.as_deref())
-        .ok_or_else(|| anyhow!("selected server has no endpoint"))?;
     let (server, server_port) = split_endpoint(endpoint)?;
-    let peer_public_key = certificate
-        .peer_public_key
-        .clone()
-        .or(selected_server.public_key.clone())
-        .ok_or_else(|| anyhow!("selected server has no WireGuard peer public key"))?;
 
     Ok(SingboxWireGuardEndpoint {
         outbound_type: "wireguard".into(),
         tag: tag.into(),
         system: false,
         mtu: 1408,
-        address: vec![certificate.assigned_ip.clone()],
+        address: address.to_vec(),
         private_key: key_material.private_key_base64.clone(),
+        listen_port: None,
         peers: vec![SingboxWireGuardPeer {
             address: server,
             port: server_port,
-            public_key: peer_public_key,
+            public_key: peer_public_key.to_string(),
+            pre_shared_key: None,
             allowed_ips: default_allowed_ips(),
-            persistent_keepalive_interval: Some(25),
+            persistent_keepalive_interval,
+            reserved: reserved.map(|value| value.to_vec()),
         }],
+        udp_timeout: None,
+        workers: None,
     })
 }
 
@@ -100,35 +105,23 @@ mod tests {
             private_key_base64: "private".into(),
             public_key_base64: "public".into(),
         };
-        let certificate = CertificateResponse {
-            certificate: "cert".into(),
-            expiration_time_ms: 2,
-            refresh_time_ms: 1,
-            assigned_ip: "10.2.0.2/32".into(),
-            endpoint: Some("203.0.113.10:51820".into()),
-            peer_public_key: Some("peer".into()),
-        };
-        let server = PhysicalServer {
-            id: "server".into(),
-            name: "server".into(),
-            entry_ip: None,
-            entry_ipv6: None,
-            exit_ip: None,
-            domain: None,
-            label: None,
-            status: 1,
-            load: None,
-            public_key: None,
-            generation: None,
-            services_down: Some(0),
-            services_down_reason: None,
-        };
+        let address = vec!["10.2.0.2/32".to_string()];
 
-        let endpoint =
-            build_wireguard_endpoint("wg", &key_material, &certificate, &server).expect("endpoint");
+        let endpoint = build_wireguard_endpoint(
+            "wg",
+            &key_material,
+            "203.0.113.10:51820",
+            "peer",
+            &address,
+            Some(60),
+            Some(&[1, 2, 3]),
+        )
+        .expect("endpoint");
         assert_eq!(endpoint.address, vec!["10.2.0.2/32"]);
         assert_eq!(endpoint.peers[0].address, "203.0.113.10");
         assert_eq!(endpoint.peers[0].port, 51820);
         assert_eq!(endpoint.peers[0].allowed_ips, default_allowed_ips());
+        assert_eq!(endpoint.peers[0].persistent_keepalive_interval, Some(60));
+        assert_eq!(endpoint.peers[0].reserved, Some(vec![1, 2, 3]));
     }
 }

@@ -1,4 +1,9 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+
+const PROTON_WIREGUARD_DEFAULT_PORT: u16 = 51820;
+const PROTON_WIREGUARD_UDP_PROTOCOL: &str = "WireGuardUDP";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct LogicalServer {
@@ -40,6 +45,8 @@ pub struct PhysicalServer {
     pub entry_ip: Option<String>,
     #[serde(alias = "EntryIPv6", alias = "entry_ipv6", default)]
     pub entry_ipv6: Option<String>,
+    #[serde(alias = "EntryPerProtocol", default)]
+    pub entry_per_protocol: BTreeMap<String, ServerEntryInfo>,
     #[serde(alias = "ExitIP", alias = "exit_ip", default)]
     pub exit_ip: Option<String>,
     #[serde(alias = "Domain", default)]
@@ -58,6 +65,66 @@ pub struct PhysicalServer {
     pub services_down: Option<u64>,
     #[serde(alias = "ServicesDownReason", default)]
     pub services_down_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct ServerEntryInfo {
+    #[serde(alias = "IPv4", default)]
+    pub ipv4: Option<String>,
+    #[serde(alias = "Ports", default)]
+    pub ports: Vec<u16>,
+}
+
+impl PhysicalServer {
+    pub fn proton_wireguard_endpoint(&self) -> Option<String> {
+        let protocol_entry = self.entry_per_protocol.get(PROTON_WIREGUARD_UDP_PROTOCOL);
+        let host = protocol_entry
+            .and_then(|entry| non_empty(entry.ipv4.as_deref()))
+            .or_else(|| non_empty(self.entry_ip.as_deref()))
+            .or_else(|| non_empty(self.domain.as_deref()))?;
+        let port = protocol_entry
+            .and_then(|entry| entry.ports.first().copied())
+            .unwrap_or(PROTON_WIREGUARD_DEFAULT_PORT);
+        Some(format_endpoint(host, port))
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn format_endpoint(host: &str, default_port: u16) -> String {
+    if let Some((host, port)) = parse_explicit_endpoint(host) {
+        return format_socket_address(&host, port);
+    }
+    format_socket_address(host.trim_matches(['[', ']']), default_port)
+}
+
+fn parse_explicit_endpoint(endpoint: &str) -> Option<(String, u16)> {
+    if let Some(rest) = endpoint.strip_prefix('[')
+        && let Some((host, port)) = rest.split_once("]:")
+    {
+        return port
+            .parse::<u16>()
+            .ok()
+            .map(|port| (host.to_string(), port));
+    }
+
+    let (host, port) = endpoint.rsplit_once(':')?;
+    if host.contains(':') {
+        return None;
+    }
+    port.parse::<u16>()
+        .ok()
+        .map(|port| (host.to_string(), port))
+}
+
+fn format_socket_address(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 pub fn default_status() -> i32 {
@@ -107,6 +174,12 @@ mod tests {
                 "Servers": [{
                     "EntryIP": "89.39.107.113",
                     "EntryIPv6": "2a00:7c80:0:3ad::10",
+                    "EntryPerProtocol": {
+                        "WireGuardUDP": {
+                            "IPv4": "89.39.107.113",
+                            "Ports": [443]
+                        }
+                    },
                     "ExitIP": "89.39.107.113",
                     "Domain": "node-nl-05.protonvpn.net",
                     "ID": "physical-id",
@@ -131,5 +204,9 @@ mod tests {
             Some("2a00:7c80:0:3ad::10")
         );
         assert_eq!(servers[0].servers[0].services_down, Some(0));
+        assert_eq!(
+            servers[0].servers[0].proton_wireguard_endpoint().as_deref(),
+            Some("89.39.107.113:443")
+        );
     }
 }

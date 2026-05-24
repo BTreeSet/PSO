@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 
 use crate::crypto::generate_key_material;
 use crate::model::PhysicalServer;
+use crate::proton::PROTON_WIREGUARD_ADDRESS_V4;
 use crate::session::UserSession;
 use crate::singbox_adapter::{default_allowed_ips, split_endpoint};
 
@@ -27,14 +28,12 @@ pub trait WireGuardProvisioner {
 #[derive(Clone, Debug)]
 pub struct LocalKeyProvisioner {
     address: Vec<String>,
-    default_port: u16,
 }
 
 impl Default for LocalKeyProvisioner {
     fn default() -> Self {
         Self {
-            address: vec!["10.2.0.2/32".into()],
-            default_port: 51820,
+            address: vec![PROTON_WIREGUARD_ADDRESS_V4.into()],
         }
     }
 }
@@ -55,15 +54,12 @@ impl WireGuardProvisioner for LocalKeyProvisioner {
     ) -> Result<WireGuardCredentials> {
         let key_material = generate_key_material();
         let endpoint = server
-            .entry_ip
-            .as_deref()
-            .or(server.domain.as_deref())
+            .proton_wireguard_endpoint()
             .ok_or_else(|| anyhow!("selected server for {outbound_tag} has no endpoint"))?;
         let peer_public_key = server.public_key.clone().ok_or_else(|| {
             anyhow!("selected server for {outbound_tag} has no WireGuard public key")
         })?;
-        let (peer_address, peer_port) =
-            split_endpoint(&format!("{endpoint}:{}", self.default_port))?;
+        let (peer_address, peer_port) = split_endpoint(&endpoint)?;
 
         Ok(WireGuardCredentials {
             peer_address,

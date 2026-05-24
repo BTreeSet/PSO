@@ -21,13 +21,21 @@ The WireGuard-capable provider surface tracked from Gluetun research is:
 
 | Provider | PSO mode | Notes |
 | --- | --- | --- |
-| Proton | dynamic API | Native SRP login, VPN session refresh, topology fetch, certificate registration, local key generation. |
-| AirVPN | static catalog | Declare endpoint, non-default WireGuard port, peer public key, assigned address, and filters. |
+| Proton | dynamic API | Native SRP login, stored auth-session refresh, topology fetch, certificate registration, local key generation. |
+| AirVPN | static catalog | Declare endpoint, non-default WireGuard port, peer public key, pre_shared_key, assigned address, and filters. |
+| CyberGhost | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. |
 | FastestVPN | static catalog | Declare provider-issued WireGuard endpoint metadata. |
 | IVPN | dynamic catalog or static catalog | Public server metadata can be refreshed automatically; declare alternate WireGuard ports or pinned fallback servers when needed. |
 | Mullvad | dynamic catalog or static catalog | Public relay metadata can be refreshed automatically and supports WireGuard peer `reserved` bytes. |
 | NordVPN | static catalog | Declare NordLynx/WireGuard endpoint metadata. |
+| Perfect Privacy | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. |
+| Private Internet Access | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. Automatic provider-side port forwarding is not implemented yet. |
+| PrivateVPN | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. Automatic provider-side port forwarding is not implemented yet. |
+| PureVPN | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. |
 | Surfshark | dynamic catalog or static catalog | Public WireGuard cluster metadata can be refreshed automatically; static catalogs can pin metadata locally. |
+| TorGuard | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. |
+| VPNUnlimited | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. |
+| VyprVPN | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. |
 | Windscribe | static catalog | Declare provider-specific WireGuard ports and peer public keys from the provider catalog. |
 | Custom | static catalog | Use for any provider with known WireGuard endpoint metadata. |
 
@@ -54,7 +62,7 @@ Dynamic or static WireGuard providers live under `providers.wireguard` in `pso.c
 }
 ```
 
-`source` defaults to `{"type":"static"}`. Built-in dynamic sources are `mullvad_api`, `ivpn_api`, and `surfshark_api`. For dynamic catalogs, `servers` is optional and acts as a local fallback when the public API is unavailable or when you want to pin known-good metadata. `local_address` is still the tunnel address assigned by the provider for the local WireGuard identity; it can be declared at provider, server, or template-endpoint level. PSO does not accept a WireGuard private key from config; it generates and persists local private/public key material in SQLite. If a provider requires public-key registration, register the public key PSO records for the endpoint out of band or extend PSO with a provider-specific dynamic API implementation.
+`source` defaults to `{"type":"static"}`. Built-in dynamic sources are `mullvad_api`, `ivpn_api`, and `surfshark_api`. For dynamic catalogs, `servers` is optional and acts as a local fallback when the public API is unavailable or when you want to pin known-good metadata. `local_address` is still the tunnel address assigned by the provider for the local WireGuard identity; it can be declared at provider, server, or template-endpoint level. `pre_shared_key` can also be declared at provider, server, or template-endpoint level and is injected into the rendered sing-box peer object when present. PSO does not accept a WireGuard private key from config; it generates and persists local private/public key material in SQLite. If a provider requires public-key registration, register the public key PSO records for the endpoint out of band or extend PSO with a provider-specific dynamic API implementation.
 
 Public provider catalogs often expose provider-native location labels such as `Sweden` instead of ISO country codes. Template filters should match the actual catalog values that the provider returns.
 
@@ -78,6 +86,20 @@ A provider endpoint references the catalog by name:
 
 Supported filter fields are `server`, `country`, `city`, `region`, `features`, `max_load`, `status`, and `sort_by` (`load_asc` or `name_asc`). On unhealthy probes, PSO attempts to reselect the next matching server when more than one candidate exists. For dynamic catalogs, matching is done against the provider's published country, city, and region strings.
 
+Providers that require a WireGuard `pre_shared_key` can also declare it directly on the template endpoint:
+
+```json
+{
+  "type": "wireguard",
+  "tag": "airvpn-eu-1",
+  "provider": "airvpn",
+  "pre_shared_key": "replace-with-provider-pre-shared-key",
+  "filter": {
+    "server": "airvpn-eu-1"
+  }
+}
+```
+
 Proton endpoints remain dynamic and use the Proton-specific filter model:
 
 ```json
@@ -98,7 +120,7 @@ Proton endpoints remain dynamic and use the Proton-specific filter model:
 
 ## State and Rendering
 
-All hydrated WireGuard endpoint state is written to the `wireguard_endpoint_states` SQLite table. This table includes provider name, selected server, endpoint, assigned tunnel addresses, peer allowed IPs, keepalive, optional reserved bytes, local public key, and private key. State inspection intentionally does not print private keys:
+All hydrated WireGuard endpoint state is written to the `wireguard_endpoint_states` SQLite table. This table includes provider name, selected server, endpoint, assigned tunnel addresses, peer allowed IPs, optional peer pre_shared_key, keepalive, optional reserved bytes, local public key, and private key. State inspection intentionally does not print private keys or pre-shared keys:
 
 ```bash
 pso --state-dir /var/lib/pso state wireguard

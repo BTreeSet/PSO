@@ -29,6 +29,7 @@
             "country": "US",
             "endpoint": "vpn.example.net:51820",
             "public_key": "replace-with-provider-peer-public-key",
+            "pre_shared_key": "replace-with-provider-pre-shared-key",
             "local_address": [
               "10.10.0.2/32"
             ]
@@ -60,6 +61,8 @@
   },
   "topology": {
     "account": "alice-plus",
+    "country": "US",
+    "netzone": "203.0.113.0",
     "fallback_topology": "proton-logicals.example.json",
     "require_live": false
   },
