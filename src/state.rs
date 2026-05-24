@@ -15,6 +15,36 @@ pub struct VpnSessionState {
     pub refresh_token: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct AccountRow {
+    pub account_key: String,
+    pub username: String,
+    pub updated_at: i64,
+    pub has_vpn_session: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RuntimeEventRow {
+    pub id: i64,
+    pub occurred_at: i64,
+    pub username: Option<String>,
+    pub outbound_tag: Option<String>,
+    pub event_type: String,
+    pub details_json: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HealthCheckRow {
+    pub id: i64,
+    pub occurred_at: i64,
+    pub username: Option<String>,
+    pub outbound_tag: Option<String>,
+    pub status: String,
+    pub raw_ip: String,
+    pub returned_ip: Option<String>,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct HealthRecord<'a> {
     pub username: Option<&'a str>,
@@ -120,6 +150,69 @@ impl StateStore {
         Ok(())
     }
 
+    pub fn list_accounts(&self) -> Result<Vec<AccountRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT a.account_key, a.username, a.updated_at, s.account_key IS NOT NULL
+             FROM accounts a
+             LEFT JOIN vpn_sessions s ON s.account_key = a.account_key
+             ORDER BY a.updated_at DESC, a.username ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AccountRow {
+                account_key: row.get(0)?,
+                username: row.get(1)?,
+                updated_at: row.get(2)?,
+                has_vpn_session: row.get(3)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    pub fn list_events(&self, limit: usize) -> Result<Vec<RuntimeEventRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT e.id, e.occurred_at, a.username, e.outbound_tag, e.event_type, e.details_json
+             FROM runtime_events e
+             LEFT JOIN accounts a ON a.account_key = e.account_key
+             ORDER BY e.occurred_at DESC, e.id DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            Ok(RuntimeEventRow {
+                id: row.get(0)?,
+                occurred_at: row.get(1)?,
+                username: row.get(2)?,
+                outbound_tag: row.get(3)?,
+                event_type: row.get(4)?,
+                details_json: row.get(5)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    pub fn list_health_checks(&self, limit: usize) -> Result<Vec<HealthCheckRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT h.id, h.occurred_at, a.username, h.outbound_tag, h.status,
+                    h.raw_ip, h.returned_ip, h.reason
+             FROM health_checks h
+             LEFT JOIN accounts a ON a.account_key = h.account_key
+             ORDER BY h.occurred_at DESC, h.id DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            Ok(HealthCheckRow {
+                id: row.get(0)?,
+                occurred_at: row.get(1)?,
+                username: row.get(2)?,
+                outbound_tag: row.get(3)?,
+                status: row.get(4)?,
+                raw_ip: row.get(5)?,
+                returned_ip: row.get(6)?,
+                reason: row.get(7)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
     fn migrate(&self) -> Result<()> {
         self.connection.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -172,6 +265,13 @@ impl StateStore {
         )?;
         Ok(())
     }
+}
+
+fn collect_rows<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+) -> Result<Vec<T>> {
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn topology_state_file(context: &RuntimeContext) -> PathBuf {

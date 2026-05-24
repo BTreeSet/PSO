@@ -52,6 +52,7 @@ Use the grouped subcommands for setup and troubleshooting:
 - `topology fetch` updates topology state.
 - `render` produces or deploys a `sing-box` config once.
 - `health baseline` and `health probe` inspect IP behavior.
+- `state accounts`, `state events`, and `state health` inspect SQLite state.
 
 ## Authentication
 
@@ -172,6 +173,18 @@ cargo run -- health probe --raw-ip 198.51.100.1 --proxy-url socks5h://127.0.0.1:
 ```
 
 If the returned probe IP equals the raw baseline, PSO reports `Leaking`. If both Cloudflare and ipinfo fail, it reports `Dead`. Any non-baseline IP is treated as `Healthy`.
+
+## State Inspection
+
+Inspect the SQLite state database without opening it manually:
+
+```bash
+pso --state-dir /var/lib/pso state accounts
+pso --state-dir /var/lib/pso state events --limit 100
+pso --state-dir /var/lib/pso state health --limit 100 --json
+```
+
+`state accounts` shows known Proton account keys, usernames, and whether a VPN session exists. `state events` shows runtime events such as session updates and health-triggered certificate refresh outcomes. `state health` shows probe history with raw IP, returned IP, status, and reason.
 
 ## Containers
 

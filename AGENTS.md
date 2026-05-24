@@ -21,6 +21,7 @@ Keep three runtime concepts separate:
 - Prefer explicit `sing-box` targeting by PID or executable path. Name-based process lookup is only a last fallback.
 - Auth flows must support headless operation: password in config/file/env, TOTP in config/env, mounted state directory, and CAPTCHA token retry.
 - Health and recovery should be automatic in the `run` path. Manual commands should remain useful for troubleshooting but should not be the primary operational model.
+- State observability belongs in the grouped `state` CLI. Prefer stable, typed SQLite queries over ad hoc shell instructions.
 - Multi-account work must keep each Proton account isolated in state and refresh WireGuard identity independently. Usernames are identifiers, not filesystem-safe names; hash or otherwise normalize them before using them in state paths.
 
 ## Code Style

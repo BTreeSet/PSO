@@ -24,6 +24,7 @@ pub enum Command {
     ControlPlane(ControlPlaneArgs),
     Auth(AuthArgs),
     Topology(TopologyArgs),
+    State(StateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -47,6 +48,27 @@ pub struct TopologyArgs {
 #[derive(Debug, Subcommand)]
 pub enum TopologyCommand {
     Fetch(FetchLogicalsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StateArgs {
+    #[command(subcommand)]
+    pub command: StateCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StateCommand {
+    Accounts,
+    Events(StateListArgs),
+    Health(StateListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StateListArgs {
+    #[arg(long, default_value = "50")]
+    pub limit: usize,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

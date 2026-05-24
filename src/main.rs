@@ -27,6 +27,8 @@ use serde_json::Value;
 use tokio::time::sleep;
 use tracing::info;
 
+mod state_cli;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -65,6 +67,7 @@ async fn main() -> Result<()> {
         Command::Topology(args) => match args.command {
             TopologyCommand::Fetch(args) => fetch_logicals(&context, &config.topology, args).await,
         },
+        Command::State(args) => state_cli::run_state(&context, args),
     }
 }
 
