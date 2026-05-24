@@ -25,6 +25,12 @@ pub struct ControlPlaneConfig {
 }
 
 #[derive(Clone, Debug)]
+pub struct CertificateRefreshOutcome {
+    pub expiration_time_ms: u64,
+    pub refresh_time_ms: u64,
+}
+
+#[derive(Clone, Debug)]
 pub struct ControlPlane {
     api: ProtonApiClient,
     scheduler: RefreshScheduler,
@@ -89,6 +95,31 @@ impl ControlPlane {
                 }
             }
         }
+    }
+
+    pub async fn refresh_once(
+        &self,
+        config: &ControlPlaneConfig,
+    ) -> Result<CertificateRefreshOutcome> {
+        let key_material = generate_key_material();
+        let request = CertificateRequest::wireguard_session(&key_material.public_key_base64);
+        let certificate = self
+            .api
+            .get_certificate(&config.access_token, &request)
+            .await?;
+        let outbound = build_wireguard_outbound(
+            &config.outbound_tag,
+            &key_material,
+            &certificate,
+            &config.selected_server,
+        )?;
+        write_singbox_config(&config.active_config, &json!({ "outbounds": [outbound] }))?;
+        sighup_process(config.singbox_pid)?;
+        info!(tag = %config.outbound_tag, "certificate refreshed and sing-box reloaded");
+        Ok(CertificateRefreshOutcome {
+            expiration_time_ms: certificate.expiration_time_ms,
+            refresh_time_ms: certificate.refresh_time_ms,
+        })
     }
 }
 

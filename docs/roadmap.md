@@ -4,7 +4,7 @@ This roadmap lists technical directions that fit PSO's goal: automatic `sing-box
 
 ## Near Term
 
-- State directory ownership: keep all generated and persistent runtime files under one opaque state directory, including topology state, VPN session state, certificate metadata, rendered temporary configs, and health snapshots.
+- State directory ownership: keep generated and persistent runtime state under one opaque state directory. SQLite owns VPN session state, certificate metadata, runtime events, and health history; raw topology remains as JSON for provider troubleshooting.
 - Token-aware commands: allow commands that currently accept `PSO_PROTON_ACCESS_TOKEN` to refresh VPN access tokens from state automatically.
 - Multi-outbound daemon loop: continuously fetch topology, select targets from declarative filters, refresh WireGuard certificates, write sing-box config, and reload with SIGHUP.
 - Health-driven recovery: combine Cloudflare/ipinfo probe results with outbound state to reselect servers when an outbound is dead or leaking.
@@ -13,7 +13,7 @@ This roadmap lists technical directions that fit PSO's goal: automatic `sing-box
 ## Container Operation
 
 - Runtime entrypoint: add a Docker-first command that performs login/refresh, topology fetch, render, sing-box startup, and control-loop execution from one process model.
-- Example compose files: document mounted config files, mounted state directory, Docker secrets for password input, required capabilities, and expected ports.
+- Example compose files: document mounted config files, mounted state directory, optional password-file input, required capabilities, and expected ports.
 - State permissions: define owner, mode, and migration behavior for state files written by the container.
 - Image provenance: publish SBOM/provenance attestations alongside GHCR images.
 

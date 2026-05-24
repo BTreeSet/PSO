@@ -21,10 +21,7 @@ use pso::model::{PhysicalServer, ProtonLogicalResponse};
 use pso::process::{find_process_pid, find_process_pid_by_exe};
 use pso::provisioning::LocalKeyProvisioner;
 use pso::session::{SessionStore, UserSession};
-use pso::state::{
-    load_vpn_session_state, store_vpn_session_state, topology_state_file, vpn_session_state_file,
-    write_state_file,
-};
+use pso::state::{HealthRecord, StateStore, topology_state_file, write_state_file};
 use pso::template::hydrate_template;
 use serde_json::Value;
 use tokio::time::sleep;
@@ -82,13 +79,16 @@ async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Res
         Some(ip) => ip,
         None => HealthMonitor::acquire_baseline().await?,
     };
-    let monitor = HealthMonitor::new(raw_ip, interval)?;
+    let run_username = run_username(config);
+    let monitor = HealthMonitor::new(raw_ip.clone(), interval)?;
+    let state = StateStore::open(context)?;
+    state.record_event(run_username.as_deref(), None, "run_started", None)?;
 
     loop {
         let access_token = resolve_run_access_token(
             context,
             args.access_token.as_deref(),
-            run_username(config).as_deref(),
+            run_username.as_deref(),
         )
         .await?;
         let topology_output = config
@@ -100,7 +100,7 @@ async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Res
             context,
             &config.topology,
             FetchLogicalsArgs {
-                access_token,
+                access_token: access_token.clone(),
                 output: topology_output,
                 fallback_topology: None,
                 require_live: false,
@@ -124,7 +124,60 @@ async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Res
         .await?;
 
         let probe = monitor.probe_once(proxy_url.as_deref()).await;
+        state.record_health(HealthRecord {
+            username: run_username.as_deref(),
+            outbound_tag: config.control_plane.outbound_tag.as_deref(),
+            status: &format!("{:?}", probe.status),
+            raw_ip: &raw_ip,
+            returned_ip: probe.returned_ip.as_deref(),
+            reason: &probe.reason,
+        })?;
         if probe.status != HealthStatus::Healthy {
+            let status = format!("{:?}", probe.status);
+            let recovery_details = serde_json::to_string(&serde_json::json!({
+                "status": status,
+                "reason": &probe.reason,
+            }))?;
+            state.record_event(
+                run_username.as_deref(),
+                config.control_plane.outbound_tag.as_deref(),
+                "health_recovery_requested",
+                Some(&recovery_details),
+            )?;
+            match refresh_certificate_once_from_run(context, &config.control_plane, &access_token)
+                .await
+            {
+                Ok(Some(outcome)) => {
+                    let details = serde_json::to_string(&serde_json::json!({
+                        "expiration_time_ms": outcome.expiration_time_ms,
+                        "refresh_time_ms": outcome.refresh_time_ms,
+                    }))?;
+                    state.record_event(
+                        run_username.as_deref(),
+                        config.control_plane.outbound_tag.as_deref(),
+                        "certificate_refresh_succeeded",
+                        Some(&details),
+                    )?;
+                }
+                Ok(None) => state.record_event(
+                    run_username.as_deref(),
+                    config.control_plane.outbound_tag.as_deref(),
+                    "certificate_refresh_skipped",
+                    Some("{\"reason\":\"control_plane configuration is incomplete\"}"),
+                )?,
+                Err(error) => {
+                    let details = serde_json::to_string(&serde_json::json!({
+                        "error": error.to_string(),
+                    }))?;
+                    state.record_event(
+                        run_username.as_deref(),
+                        config.control_plane.outbound_tag.as_deref(),
+                        "certificate_refresh_failed",
+                        Some(&details),
+                    )?;
+                    eprintln!("warning: health-triggered certificate refresh failed: {error:#}");
+                }
+            }
             eprintln!(
                 "warning: health probe reported {:?}; next cycle will refresh state and render again",
                 probe.status
@@ -150,15 +203,15 @@ async fn resolve_run_access_token(
     let username = username.context(
         "username is required to refresh VPN token from state; set auth.username or pass access token",
     )?;
-    let session_state = vpn_session_state_file(context, username);
-    let state = load_vpn_session_state(&session_state)?;
+    let store = StateStore::open(context)?;
+    let state = store.load_vpn_session(username)?;
     let api = ProtonApiClient::new(&context.api_base_url)?;
     let refreshed: AuthTokens = api
         .refresh_session(&state.uid, &state.refresh_token)
         .await
         .context("failed to refresh VPN token from state")?;
     let uid = refreshed.uid.as_deref().unwrap_or(&state.uid);
-    store_vpn_session_state(uid, &refreshed.refresh_token, &session_state)?;
+    store.store_vpn_session(username, uid, &refreshed.refresh_token)?;
     Ok(refreshed.access_token)
 }
 
@@ -286,6 +339,56 @@ async fn control_plane(
             },
         })
         .await
+}
+
+async fn refresh_certificate_once_from_run(
+    context: &RuntimeContext,
+    config: &ControlPlaneDefaults,
+    access_token: &str,
+) -> Result<Option<pso::CertificateRefreshOutcome>> {
+    let Some(active_config) = config.active_config.clone() else {
+        return Ok(None);
+    };
+    let Some(endpoint) = config.endpoint.clone() else {
+        return Ok(None);
+    };
+    let singbox_bin = config
+        .singbox_bin
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("sing-box"));
+    let singbox_pid = match config.singbox_pid {
+        Some(pid) => pid,
+        None => resolve_singbox_pid(&singbox_bin)?,
+    };
+    let api = ProtonApiClient::new(&context.api_base_url)?;
+    let control_plane = ControlPlane::new(api);
+    control_plane
+        .refresh_once(&ControlPlaneConfig {
+            access_token: access_token.to_string(),
+            active_config,
+            singbox_pid,
+            outbound_tag: config
+                .outbound_tag
+                .clone()
+                .unwrap_or_else(|| "proton-wg".to_string()),
+            selected_server: PhysicalServer {
+                id: String::new(),
+                name: String::new(),
+                entry_ip: Some(endpoint),
+                entry_ipv6: None,
+                exit_ip: None,
+                domain: None,
+                label: None,
+                status: 1,
+                load: None,
+                public_key: config.peer_public_key.clone(),
+                generation: None,
+                services_down: Some(0),
+                services_down_reason: None,
+            },
+        })
+        .await
+        .map(Some)
 }
 
 async fn fetch_logicals(
@@ -419,11 +522,7 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
         .clone()
         .or(primary.uid.clone())
         .context("Proton login response did not include UID for session state")?;
-    store_vpn_session_state(
-        &uid,
-        &vpn.refresh_token,
-        &vpn_session_state_file(context, &username),
-    )?;
+    StateStore::open(context)?.store_vpn_session(&username, &uid, &vpn.refresh_token)?;
 
     if let Some(output) = args.output {
         fs::write(&output, serde_json::to_string_pretty(&vpn)?)
@@ -444,14 +543,14 @@ async fn refresh_vpn_token(
         .username
         .or(config.username.clone())
         .context("username is required; pass --username or set auth.username in config")?;
-    let session_state = vpn_session_state_file(context, &username);
-    let state = load_vpn_session_state(&session_state)?;
+    let store = StateStore::open(context)?;
+    let state = store.load_vpn_session(&username)?;
     let api = ProtonApiClient::new(&context.api_base_url)?;
     let refreshed = api
         .refresh_session(&state.uid, &state.refresh_token)
         .await?;
     let uid = refreshed.uid.as_deref().unwrap_or(&state.uid);
-    store_vpn_session_state(uid, &refreshed.refresh_token, &session_state)?;
+    store.store_vpn_session(&username, uid, &refreshed.refresh_token)?;
 
     if let Some(output) = args.output {
         fs::write(&output, serde_json::to_string_pretty(&refreshed)?)
