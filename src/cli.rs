@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -117,8 +116,6 @@ pub struct RenderArgs {
     pub singbox_pid: Option<i32>,
     #[arg(long)]
     pub singbox_bin: Option<PathBuf>,
-    #[arg(long = "session", value_parser = parse_session)]
-    pub sessions: Vec<(String, String)>,
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -154,7 +151,9 @@ pub struct ProbeArgs {
 #[derive(Debug, Args)]
 pub struct ControlPlaneArgs {
     #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
-    pub access_token: String,
+    pub access_token: Option<String>,
+    #[arg(long)]
+    pub account: Option<String>,
     #[arg(long)]
     pub active_config: Option<PathBuf>,
     #[arg(long)]
@@ -172,7 +171,9 @@ pub struct ControlPlaneArgs {
 #[derive(Debug, Args)]
 pub struct FetchLogicalsArgs {
     #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
-    pub access_token: String,
+    pub access_token: Option<String>,
+    #[arg(long)]
+    pub account: Option<String>,
     #[arg(long, default_value = "proton-logicals.json")]
     pub output: PathBuf,
     #[arg(long)]
@@ -183,6 +184,8 @@ pub struct FetchLogicalsArgs {
 
 #[derive(Debug, Args)]
 pub struct LoginArgs {
+    #[arg(long)]
+    pub account: Option<String>,
     #[arg(long)]
     pub username: Option<String>,
     #[arg(long, env = "PSO_PROTON_PASSWORD")]
@@ -206,14 +209,9 @@ pub struct LoginArgs {
 #[derive(Debug, Args)]
 pub struct RefreshVpnTokenArgs {
     #[arg(long)]
+    pub account: Option<String>,
+    #[arg(long)]
     pub username: Option<String>,
     #[arg(long)]
     pub output: Option<PathBuf>,
-}
-
-fn parse_session(value: &str) -> Result<(String, String), String> {
-    let (username, tier) = value
-        .split_once(':')
-        .ok_or_else(|| "session must use username:tier format".to_string())?;
-    Ok((username.to_string(), tier.to_string()))
 }

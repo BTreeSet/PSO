@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod api;
 pub mod auth;
 pub mod cli;
@@ -9,6 +10,7 @@ pub mod filter;
 pub mod health;
 pub mod model;
 pub mod process;
+pub mod proton;
 pub mod provider;
 pub mod provisioning;
 pub mod scheduler;
@@ -20,6 +22,7 @@ pub mod supervisor;
 mod supervisor_render;
 pub mod template;
 
+pub use accounts::{ProtonAccount, ProtonAccountRegistry, require_single_account_access_token};
 pub use api::{CertificateRequest, CertificateResponse, ProtonApiClient};
 pub use auth::{SrpProof, calculate_srp_proof, resolve_two_factor_code};
 pub use control_plane::{CertificateRefreshOutcome, ControlPlane, ControlPlaneConfig};
@@ -29,6 +32,7 @@ pub use filter::{FeatureMask, ServerFilter, select_target};
 pub use health::{HealthMonitor, HealthStatus, ProbeResult};
 pub use model::{LogicalServer, PhysicalServer};
 pub use process::{find_process_pid, find_process_pid_by_exe, sighup_process};
+pub use proton::{CachedAccessToken, ensure_account_access_token, login_configured_account};
 pub use provider::{
     KnownWireGuardProvider, ProvidersConfig, WireGuardEndpointResolution, WireGuardProviderConfig,
     WireGuardServerConfig, WireGuardServerFilter, known_wireguard_providers,

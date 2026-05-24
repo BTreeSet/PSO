@@ -21,77 +21,42 @@ pub const KNOWN_WIREGUARD_PROVIDERS: &[KnownWireGuardProvider] = &[
     KnownWireGuardProvider {
         name: "airvpn",
         mode: "static-wireguard-catalog",
-        notes: "Declare WireGuard endpoints, ports, peer public keys, and assigned tunnel addresses in providers.wireguard.",
+        notes: "Declare AirVPN WireGuard endpoints, including the provider's non-default port and assigned tunnel addresses, in providers.wireguard.",
     },
     KnownWireGuardProvider {
         name: "fastestvpn",
         mode: "static-wireguard-catalog",
-        notes: "Declare provider-issued WireGuard endpoint metadata in providers.wireguard.",
+        notes: "Declare provider-issued WireGuard endpoint metadata from FastestVPN's server catalog.",
     },
     KnownWireGuardProvider {
         name: "ivpn",
         mode: "static-wireguard-catalog",
-        notes: "Supports alternate WireGuard ports when supplied in the provider catalog.",
+        notes: "Supports IVPN WireGuard hostnames, peer public keys, and alternate provider ports when supplied in the catalog.",
     },
     KnownWireGuardProvider {
         name: "mullvad",
         mode: "static-wireguard-catalog",
-        notes: "Supports peer reserved bytes for providers that require them.",
+        notes: "Supports Mullvad WireGuard catalogs and peer reserved bytes when the provider metadata requires them.",
     },
     KnownWireGuardProvider {
         name: "nordvpn",
         mode: "static-wireguard-catalog",
-        notes: "Declare NordLynx/WireGuard endpoint metadata from provider-issued configuration.",
+        notes: "Declare NordLynx/WireGuard endpoint metadata, including per-server peer public keys, from provider-issued configuration.",
     },
     KnownWireGuardProvider {
         name: "surfshark",
         mode: "static-wireguard-catalog",
-        notes: "Declare WireGuard endpoint metadata and use template filters for country/city/server selection.",
+        notes: "Declare Surfshark WireGuard endpoint metadata and use template filters for region, country, and city selection.",
     },
     KnownWireGuardProvider {
         name: "windscribe",
         mode: "static-wireguard-catalog",
-        notes: "Supports alternate WireGuard ports when supplied in the provider catalog.",
+        notes: "Supports Windscribe WireGuard endpoint metadata, including provider-specific port conventions, when declared in the catalog.",
     },
     KnownWireGuardProvider {
         name: "custom",
         mode: "static-wireguard-catalog",
-        notes: "Use for any WireGuard-capable provider when endpoint, peer public key, and assigned tunnel address are known.",
-    },
-    KnownWireGuardProvider {
-        name: "cyberghost",
-        mode: "static-wireguard-catalog",
-        notes: "Supported when provider-issued WireGuard endpoint metadata is supplied; OpenVPN-only features are excluded.",
-    },
-    KnownWireGuardProvider {
-        name: "pia",
-        mode: "static-wireguard-catalog",
-        notes: "Private Internet Access can be modeled from provider-issued WireGuard endpoint metadata.",
-    },
-    KnownWireGuardProvider {
-        name: "privatevpn",
-        mode: "static-wireguard-catalog",
-        notes: "Supported when provider-issued WireGuard endpoint metadata is supplied.",
-    },
-    KnownWireGuardProvider {
-        name: "purevpn",
-        mode: "static-wireguard-catalog",
-        notes: "Supported when provider-issued WireGuard endpoint metadata is supplied.",
-    },
-    KnownWireGuardProvider {
-        name: "torguard",
-        mode: "static-wireguard-catalog",
-        notes: "Supported when provider-issued WireGuard endpoint metadata is supplied.",
-    },
-    KnownWireGuardProvider {
-        name: "vpnunlimited",
-        mode: "static-wireguard-catalog",
-        notes: "Supported when provider-issued WireGuard endpoint metadata is supplied.",
-    },
-    KnownWireGuardProvider {
-        name: "vyprvpn",
-        mode: "static-wireguard-catalog",
-        notes: "Supported when provider-issued WireGuard endpoint metadata is supplied.",
+        notes: "Use for any other WireGuard-capable provider when endpoint, peer public key, and assigned tunnel address are known.",
     },
 ];
 

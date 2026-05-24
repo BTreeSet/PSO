@@ -4,7 +4,7 @@ Proton-Singbox Orchestrator (PSO) is a Rust control plane for producing and main
 
 PSO is pre-alpha. The current codebase supports the core pieces needed for local development and container-oriented operation:
 
-- Proton SRP login, optional TOTP, and VPN session forking.
+- Proton SRP login, optional TOTP, VPN session forking, and per-account session refresh or re-login.
 - VPN refresh-token persistence in SQLite plus topology persistence in a user-opaque state directory.
 - Proton `/vpn/logicals` topology fetching with state fallback for temporary endpoint failures.
 - Declarative WireGuard endpoint rendering from `config.template.json`, Proton logical server data, and static WireGuard provider catalogs for non-Proton providers.
@@ -31,34 +31,34 @@ Global options are passed before the command group:
 pso --config pso.config.json --state-dir /var/lib/pso <command>
 ```
 
-Long-lived settings can be placed in `pso.config.json`, including auth defaults, topology fallback, render sessions, static WireGuard provider catalogs, and control-plane paths. See `pso.config.example.json`.
+Long-lived settings can be placed in `pso.config.json`, including configured Proton accounts, topology fallback, static WireGuard provider catalogs, and control-plane paths. See `pso.config.example.json`.
 
 ## Intended Operation
 
 The normal runtime path is `pso run`. It is designed for a compiled binary or container with a mounted state directory:
 
 ```bash
-PSO_STATE_DIR=/var/lib/pso \
-PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
-pso --config /etc/pso/pso.config.json run
+pso --config /etc/pso/pso.config.json --state-dir /var/lib/pso run
 ```
 
-On startup, `run` reads every provider-tagged WireGuard endpoint in the template. Proton endpoints refresh topology, refresh each account's VPN access token independently from SQLite, and register or refresh one local WireGuard identity per endpoint. Static WireGuard providers select from `providers.wireguard` catalogs and keep local key material in SQLite. PSO then deploys one combined `sing-box` config. In continuous mode, PSO runs independent endpoint loops for health checks and certificate rotation or static-server reselection, plus a Proton topology loop when Proton endpoints are present. Endpoint changes are coalesced before rendering, so several updates produce one validated config replacement and one SIGHUP.
+On startup, `run` reads every provider-tagged WireGuard endpoint in the template. Proton endpoints bind to named accounts declared in `auth.proton.accounts`; each account refreshes its VPN session from SQLite or logs in again from configured credentials as needed. Static WireGuard providers select from `providers.wireguard` catalogs and keep local key material in SQLite. PSO then deploys one combined `sing-box` config. In continuous mode, PSO runs independent endpoint loops for health checks and certificate rotation or static-server reselection, plus a Proton topology loop when Proton endpoints are present. Endpoint changes are coalesced before rendering, so several updates produce one validated config replacement and one SIGHUP.
+
+Proton account usage is intentionally explicit: one active Proton WireGuard endpoint should map to one configured Proton account. If you want several simultaneous Proton exits in different countries, provision several Proton accounts and bind each endpoint to a distinct account in the template.
 
 Certificate and key state is stored per endpoint in `pso.sqlite3`. PSO requests a new `/vpn/certificate` before Proton's refresh timestamp, retries temporary failures, rotates local key material after repeated failures, and records the full process in SQLite. If health reports `Dead` or `Leaking`, the affected endpoint immediately attempts a certificate refresh and triggers a coalesced redeploy.
 
 Use the grouped subcommands for setup and troubleshooting:
 
-- `auth login` and `auth refresh` manage VPN session state.
+- `auth login` and `auth refresh` manage configured or explicit Proton account session state.
 - `topology fetch` updates topology state.
-- `render` produces or deploys a `sing-box` config once.
+- `render` runs the same provisioning and render path as `run`, but exits after one converged deployment.
 - `health baseline` and `health probe` inspect IP behavior.
 - `providers list` shows the built-in WireGuard provider surface.
 - `state accounts`, `state certs`, `state wireguard`, `state events`, and `state health` inspect SQLite state.
 
 ## Provider Model
 
-PSO supports Proton as a native dynamic provider and supports other WireGuard-capable providers through declarative static catalogs. The static catalog path is intended for providers such as AirVPN, FastestVPN, IVPN, Mullvad, NordVPN, Surfshark, Windscribe, CyberGhost, Private Internet Access, PrivateVPN, PureVPN, TorGuard, VPN Unlimited, VyprVPN, and custom WireGuard services when endpoint metadata is known.
+PSO supports Proton as a native dynamic provider and supports other WireGuard-capable providers through declarative static catalogs. The built-in WireGuard provider surface is aligned with the verified WireGuard-capable providers from Gluetun research: AirVPN, FastestVPN, IVPN, Mullvad, NordVPN, Surfshark, Windscribe, and `custom` for any other WireGuard-capable provider when endpoint metadata is known.
 
 ```bash
 pso providers list
@@ -71,24 +71,22 @@ See `docs/providers.md` for the provider catalog schema and sing-box WireGuard n
 
 ## Authentication
 
-Run the Proton SRP login flow and fork the primary account session into a VPN-scoped session:
+Declare Proton accounts in `pso.config.json` under `auth.proton.accounts`, then log in one of them and fork the primary session into a VPN-scoped session:
 
 ```bash
-PSO_STATE_DIR=/var/lib/pso \
 cargo run -- auth login \
-  --username alice@example.com \
-  --password 'replace-with-protonvpn-password' \
-  --totp 123456 \
-  --no-prompt
+  --account alice-plus \
+  --output vpn-session.json
 ```
 
 Credential input options:
 
 - `--password` or `PSO_PROTON_PASSWORD`
 - `--password-file` or `PSO_PROTON_PASSWORD_FILE`
-- `auth.password` or `auth.password_file` in `pso.config.json` for config-first deployments
+- `auth.proton.accounts[].password` or `auth.proton.accounts[].password_file` in `pso.config.json` for config-first deployments
 - `--totp` or `PSO_PROTON_TOTP` when the account requires 2FA. The value may be a six-digit one-time code, a base32 TOTP secret, or an `otpauth://` URI.
 - `--no-prompt` for headless deployments
+- `--account` to select a configured Proton account, or `--username` for an ad hoc one-off login outside the config file
 
 On success, PSO writes VPN session state into `PSO_STATE_DIR/pso.sqlite3` and prints the current VPN-scoped token response unless `--output` is supplied.
 
@@ -97,8 +95,8 @@ When Proton requires human verification, PSO prints the challenge details return
 Refresh an existing VPN session without replaying the password flow:
 
 ```bash
-PSO_STATE_DIR=/var/lib/pso cargo run -- auth refresh \
-  --username alice@example.com \
+cargo run -- auth refresh \
+  --account alice-plus \
   --output vpn-session.json
 ```
 
@@ -107,17 +105,14 @@ PSO_STATE_DIR=/var/lib/pso cargo run -- auth refresh \
 Fetch Proton logical server topology and persist a state copy:
 
 ```bash
-PSO_STATE_DIR=/var/lib/pso \
-PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
-cargo run -- topology fetch --output proton-logicals.json
+cargo run -- topology fetch --account alice-plus --output proton-logicals.json
 ```
 
-`topology fetch` retries transient Proton API failures. On success, it writes both the requested output file and `PSO_STATE_DIR/logicals.json`. If `/vpn/logicals` is temporarily unavailable, PSO can use an explicit operator-provided fallback file:
+`topology fetch` retries transient Proton API failures. It can reuse stored session state, log in from the configured account credentials, or accept `--access-token` as a manual override. On success, it writes both the requested output file and `PSO_STATE_DIR/logicals.json`. If `/vpn/logicals` is temporarily unavailable, PSO can use an explicit operator-provided fallback file:
 
 ```bash
-PSO_STATE_DIR=/var/lib/pso \
-PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
 cargo run -- topology fetch \
+  --account alice-plus \
   --output proton-logicals.json \
   --fallback-topology proton-logicals.example.json
 ```
@@ -128,18 +123,14 @@ For offline development, `proton-logicals.example.json` contains a small fixture
 
 ## Rendering
 
-Render a `sing-box` config from declarative endpoint preferences and Proton topology:
+Render a `sing-box` config once using the same provisioning path as `run` without entering the continuous supervisor loop:
 
 ```bash
 cp config.template.example.json config.template.json
-cargo run -- render \
-  --template config.template.json \
-  --topology proton-logicals.json \
-  --output rendered.config.json.tmp \
-  --session alice@example.com:Plus \
-  --session bob_free_tier@example.com:Free \
-  --dry-run
+cargo run -- --config pso.config.json render --dry-run
 ```
+
+`render` reads the configured Proton accounts, refreshes or logs in as needed, fetches topology when Proton endpoints are present, provisions endpoint state, writes the rendered config, optionally validates with `sing-box check`, and exits.
 
 With `render` configured in `pso.config.json`, the command can be reduced to:
 
@@ -147,7 +138,7 @@ With `render` configured in `pso.config.json`, the command can be reduced to:
 cargo run -- --config pso.config.json render
 ```
 
-Human-readable tier filters are supported: `Free`, `Basic`, `Plus`, and `Visionary`.
+Human-readable Proton tier filters are supported: `Free`, `Basic`, `Plus`, and `Visionary`.
 
 Remove `--dry-run` to validate with `sing-box check`. Add `--active-config /path/to/config.json --singbox-pid <pid>` to atomically replace the active config and send SIGHUP.
 
@@ -158,17 +149,17 @@ The production path for certificate refresh is `pso run`, which coalesces endpoi
 Run the manual single-endpoint certificate refresh loop:
 
 ```bash
-PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' cargo run -- control-plane \
+cargo run -- control-plane \
+  --account alice-plus \
   --active-config /etc/sing-box/config.json \
   --endpoint 203.0.113.10:443 \
   --peer-public-key replace-with-peer-public-key \
   --outbound-tag proton-wg
 ```
 
-With `control_plane` configured in `pso.config.json`, pass only the token:
+With `control_plane` configured in `pso.config.json`, pass only the account selector or a one-off token override:
 
 ```bash
-PSO_PROTON_ACCESS_TOKEN='replace-with-vpn-access-token' \
 cargo run -- --config pso.config.json control-plane
 ```
 
@@ -220,7 +211,7 @@ The intended Docker setup mounts:
 - `pso.config.json` at `/etc/pso/pso.config.json`
 - `config.template.json` at the path referenced by config
 - a durable state volume at `/var/lib/pso`
-- ProtonVPN username, password, and TOTP defaults in `pso.config.json`
+- Proton account names, tiers, and credentials in `pso.config.json` or mounted password files referenced from it
 
 See `docker-compose.example.yml` for the minimal layout. VPN session state is stored per account in `pso.sqlite3`; account keys are derived from `sha256(username)` so usernames are not used as filesystem path components.
 

@@ -8,12 +8,14 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::time::sleep;
 use tracing::{error, warn};
 
-use crate::api::{AuthTokens, CertificateRequest, CertificateResponse, ProtonApiClient};
+use crate::accounts::ProtonAccountRegistry;
+use crate::api::{CertificateRequest, CertificateResponse, ProtonApiClient};
 use crate::config::{AppConfig, RenderConfig, RuntimeContext, TopologyConfig, read_json};
 use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::filter::{ServerFilter, select_target};
 use crate::health::{HealthMonitor, HealthStatus, ProbeResult};
 use crate::model::{LogicalServer, PhysicalServer, ProtonLogicalResponse};
+use crate::proton::{CachedAccessToken, ensure_account_access_token};
 use crate::provider::{
     PROTON_PROVIDER, ProvidersConfig, WireGuardEndpointOverrides, WireGuardServerFilter,
     resolve_wireguard_endpoint, select_wireguard_server,
@@ -25,8 +27,8 @@ use crate::state::{
     topology_state_file, write_state_file,
 };
 use crate::supervisor_render::{
-    endpoint_specs, ensure_sessions_exist, render_and_deploy, rendered_output_path, session_map,
-    template_path, topology_output_path,
+    account_sessions, canonicalize_proton_accounts, endpoint_specs, render_and_deploy,
+    rendered_output_path, template_path, topology_output_path,
 };
 
 const DEFAULT_COALESCE_DELAY: Duration = Duration::from_secs(5);
@@ -44,7 +46,7 @@ pub struct SupervisorOptions {
 #[derive(Clone, Debug)]
 pub(crate) struct ProtonEndpointSpec {
     pub(crate) tag: String,
-    pub(crate) username: String,
+    pub(crate) account: String,
     pub(crate) filter: ServerFilter,
     pub(crate) health_proxy_url: Option<String>,
 }
@@ -82,11 +84,12 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) render: RenderConfig,
     pub(crate) topology: TopologyConfig,
     pub(crate) providers: ProvidersConfig,
+    pub(crate) proton_accounts: ProtonAccountRegistry,
     pub(crate) template: Value,
     pub(crate) specs: Vec<EndpointSpec>,
     pub(crate) sessions: BTreeMap<String, UserSession>,
     pub(crate) options: SupervisorOptions,
-    pub(crate) token_locks: Arc<BTreeMap<String, Arc<Mutex<()>>>>,
+    pub(crate) token_states: Arc<BTreeMap<String, Arc<Mutex<CachedAccessToken>>>>,
 }
 
 pub async fn run_supervisor(
@@ -95,24 +98,37 @@ pub async fn run_supervisor(
     options: SupervisorOptions,
 ) -> Result<()> {
     config.providers.validate()?;
+    config.auth.validate()?;
     let template_path = template_path(&config.render);
     let template: Value = read_json(&template_path)?;
-    let specs = endpoint_specs(&template)?;
+    let mut specs = endpoint_specs(&template)?;
     if specs.is_empty() {
         anyhow::bail!("run requires at least one provider endpoint in the template");
     }
-    let sessions = if specs
+    let proton_in_use = specs
         .iter()
-        .any(|spec| matches!(spec, EndpointSpec::Proton(_)))
-    {
-        session_map(&config.render.sessions)?
+        .any(|spec| matches!(spec, EndpointSpec::Proton(_)));
+    let proton_accounts = if proton_in_use {
+        ProtonAccountRegistry::from_auth(&config.auth)?
+    } else {
+        ProtonAccountRegistry::default()
+    };
+    if proton_in_use {
+        canonicalize_proton_accounts(&mut specs, &proton_accounts)?;
+    }
+    let sessions = if proton_in_use {
+        account_sessions(&proton_accounts)?
     } else {
         BTreeMap::new()
     };
-    ensure_sessions_exist(&specs, &sessions)?;
-    let token_locks = sessions
+    let token_states = sessions
         .keys()
-        .map(|username| (username.clone(), Arc::new(Mutex::new(()))))
+        .map(|account| {
+            (
+                account.clone(),
+                Arc::new(Mutex::new(CachedAccessToken::default())),
+            )
+        })
         .collect();
 
     let raw_ip = match options.raw_ip.clone() {
@@ -128,15 +144,16 @@ pub async fn run_supervisor(
         render: config.render.clone(),
         topology: config.topology.clone(),
         providers: config.providers.clone(),
+        proton_accounts,
         template,
         specs,
         sessions,
         options,
-        token_locks: Arc::new(token_locks),
+        token_states: Arc::new(token_states),
     };
 
-    if let Some(username) = first_proton_username(&runtime.specs) {
-        refresh_topology(&runtime, username).await?;
+    if let Some(account) = topology_account_name(&runtime) {
+        refresh_topology(&runtime, &account).await?;
     }
     supervise_once(&runtime).await?;
     if runtime.options.once {
@@ -151,10 +168,10 @@ async fn run_continuous(runtime: SupervisorRuntime) -> Result<()> {
     let deploy_runtime = runtime.clone();
     tokio::spawn(async move { deployment_loop(deploy_runtime, deploy_rx).await });
 
-    if let Some(username) = first_proton_username(&runtime.specs) {
+    if let Some(account) = topology_account_name(&runtime) {
         let topology_runtime = runtime.clone();
         let topology_tx = deploy_tx.clone();
-        tokio::spawn(async move { topology_loop(topology_runtime, username, topology_tx).await });
+        tokio::spawn(async move { topology_loop(topology_runtime, account, topology_tx).await });
     }
 
     for spec in runtime.specs.clone() {
@@ -179,10 +196,10 @@ async fn supervise_once(runtime: &SupervisorRuntime) -> Result<()> {
     Ok(())
 }
 
-async fn topology_loop(runtime: SupervisorRuntime, username: String, deploy_tx: mpsc::Sender<()>) {
+async fn topology_loop(runtime: SupervisorRuntime, account: String, deploy_tx: mpsc::Sender<()>) {
     loop {
         sleep(runtime.options.interval).await;
-        match refresh_topology(&runtime, username.clone()).await {
+        match refresh_topology(&runtime, &account).await {
             Ok(()) => {
                 let _ = deploy_tx.send(()).await;
             }
@@ -213,9 +230,10 @@ async fn outbound_loop(
             Ok(false) => {}
             Err(error) => {
                 error!(tag = %spec.tag(), %error, "outbound supervisor cycle failed");
+                let username = endpoint_username(&runtime, &spec);
                 record_runtime_error(
                     &runtime.context,
-                    endpoint_username(&spec),
+                    username.as_deref(),
                     Some(spec.tag()),
                     "outbound_cycle_failed",
                     &error,
@@ -264,13 +282,14 @@ async fn process_proton_endpoint(
     let topology = load_topology(runtime)?;
     let session = runtime
         .sessions
-        .get(&spec.username)
-        .with_context(|| format!("missing render session for {}", spec.username))?;
+        .get(&spec.account)
+        .with_context(|| format!("missing configured Proton account {}", spec.account))?;
     let selected = select_target(&topology, &spec.filter, session)?;
-    let access_token = access_token_for_user(runtime, &spec.username).await?;
+    let access_token = access_token_for_account(runtime, &spec.account).await?;
     let cert_changed = ensure_certificate(
         runtime,
         spec,
+        &session.username,
         &selected.physical,
         &access_token,
         force_refresh,
@@ -284,7 +303,7 @@ async fn process_proton_endpoint(
     let store = StateStore::open(&runtime.context)?;
     let probe = probe_endpoint_once(
         runtime,
-        Some(&spec.username),
+        Some(&session.username),
         &spec.tag,
         spec.health_proxy_url.as_deref(),
     )
@@ -299,12 +318,20 @@ async fn process_proton_endpoint(
         "reason": probe.reason,
     }))?;
     store.record_event(
-        Some(&spec.username),
+        Some(&session.username),
         Some(&spec.tag),
         "health_recovery_requested",
         Some(&details),
     )?;
-    ensure_certificate(runtime, spec, &selected.physical, &access_token, true).await?;
+    ensure_certificate(
+        runtime,
+        spec,
+        &session.username,
+        &selected.physical,
+        &access_token,
+        true,
+    )
+    .await?;
     Ok(true)
 }
 
@@ -444,6 +471,7 @@ async fn probe_endpoint_once(
 async fn ensure_certificate(
     runtime: &SupervisorRuntime,
     spec: &ProtonEndpointSpec,
+    username: &str,
     server: &PhysicalServer,
     access_token: &str,
     force_refresh: bool,
@@ -475,7 +503,7 @@ async fn ensure_certificate(
             store.store_wireguard_endpoint_state(WireGuardEndpointStateUpdate {
                 outbound_tag: &spec.tag,
                 provider: PROTON_PROVIDER,
-                identity: Some(&spec.username),
+                identity: Some(username),
                 server_id: &state.server_id,
                 server_name: &state.server_name,
                 endpoint: &state.endpoint,
@@ -514,21 +542,18 @@ async fn ensure_certificate(
     let certificate = match api.get_certificate(access_token, &request).await {
         Ok(certificate) => certificate,
         Err(error) => {
-            store.store_outbound_certificate_failure(
-                &spec.username,
-                &spec.tag,
-                &error.to_string(),
-            )?;
+            store.store_outbound_certificate_failure(username, &spec.tag, &error.to_string())?;
             return Err(error);
         }
     };
-    persist_certificate(&store, spec, server, &key_material, &certificate)?;
+    persist_certificate(&store, spec, username, server, &key_material, &certificate)?;
     Ok(true)
 }
 
 fn persist_certificate(
     store: &StateStore,
     spec: &ProtonEndpointSpec,
+    username: &str,
     server: &PhysicalServer,
     key_material: &KeyMaterial,
     certificate: &CertificateResponse,
@@ -545,7 +570,7 @@ fn persist_certificate(
         .context("Proton certificate and server topology did not include peer public key")?;
     store.store_outbound_certificate_success(OutboundCertificateUpdate {
         outbound_tag: &spec.tag,
-        username: &spec.username,
+        username,
         server_id: &stable_server_id(server),
         server_name: &server.name,
         endpoint: &endpoint,
@@ -558,9 +583,10 @@ fn persist_certificate(
     })
 }
 
-async fn refresh_topology(runtime: &SupervisorRuntime, username: String) -> Result<()> {
+async fn refresh_topology(runtime: &SupervisorRuntime, account_name: &str) -> Result<()> {
     let output = topology_output_path(&runtime.context, &runtime.render);
-    let token = access_token_for_user(runtime, &username).await?;
+    let account = runtime.proton_accounts.get_required(account_name)?;
+    let token = access_token_for_account(runtime, account_name).await?;
     let api = ProtonApiClient::new(&runtime.context.api_base_url)?;
     match api.get_logicals(&token).await {
         Ok(logicals) => {
@@ -574,7 +600,7 @@ async fn refresh_topology(runtime: &SupervisorRuntime, username: String) -> Resu
                 .with_context(|| format!("failed to write {}", output.display()))?;
             write_state_file(&topology_state_file(&runtime.context), &text)?;
             StateStore::open(&runtime.context)?.record_event(
-                Some(&username),
+                Some(&account.username),
                 None,
                 "topology_refreshed",
                 None,
@@ -606,38 +632,56 @@ fn load_topology(runtime: &SupervisorRuntime) -> Result<Vec<LogicalServer>> {
     anyhow::bail!("no topology file is available for supervisor")
 }
 
-async fn access_token_for_user(runtime: &SupervisorRuntime, username: &str) -> Result<String> {
+async fn access_token_for_account(
+    runtime: &SupervisorRuntime,
+    account_name: &str,
+) -> Result<String> {
     if let Some(access_token) = &runtime.options.access_token {
+        if runtime.proton_accounts.len() > 1 {
+            anyhow::bail!(
+                "--access-token/PSO_PROTON_ACCESS_TOKEN cannot be shared across multiple Proton accounts; configure per-account credentials or stored sessions"
+            );
+        }
         return Ok(access_token.clone());
     }
 
-    let token_lock = runtime
-        .token_locks
-        .get(username)
-        .with_context(|| format!("missing token lock for {username}"))?;
-    let _guard = token_lock.lock().await;
-    let store = StateStore::open(&runtime.context)?;
-    let state = store.load_vpn_session(username)?;
-    let api = ProtonApiClient::new(&runtime.context.api_base_url)?;
-    let refreshed: AuthTokens = api
-        .refresh_session(&state.uid, &state.refresh_token)
+    let token_state = runtime
+        .token_states
+        .get(account_name)
+        .with_context(|| format!("missing token state for account {account_name}"))?;
+    let mut token_state = token_state.lock().await;
+    let account = runtime.proton_accounts.get_required(account_name)?;
+    ensure_account_access_token(&runtime.context, account, &mut token_state)
         .await
-        .with_context(|| format!("failed to refresh VPN token for {username}"))?;
-    let uid = refreshed.uid.as_deref().unwrap_or(&state.uid);
-    store.store_vpn_session(username, uid, &refreshed.refresh_token)?;
-    Ok(refreshed.access_token)
+        .with_context(|| {
+            format!(
+                "failed to obtain Proton access token for account {}",
+                account.name
+            )
+        })
 }
 
-fn first_proton_username(specs: &[EndpointSpec]) -> Option<String> {
+fn topology_account_name(runtime: &SupervisorRuntime) -> Option<String> {
+    runtime
+        .topology
+        .account
+        .clone()
+        .or_else(|| first_proton_account_name(&runtime.specs))
+}
+
+fn first_proton_account_name(specs: &[EndpointSpec]) -> Option<String> {
     specs.iter().find_map(|spec| match spec {
-        EndpointSpec::Proton(spec) => Some(spec.username.clone()),
+        EndpointSpec::Proton(spec) => Some(spec.account.clone()),
         EndpointSpec::StaticWireGuard(_) => None,
     })
 }
 
-fn endpoint_username(spec: &EndpointSpec) -> Option<&str> {
+fn endpoint_username(runtime: &SupervisorRuntime, spec: &EndpointSpec) -> Option<String> {
     match spec {
-        EndpointSpec::Proton(spec) => Some(&spec.username),
+        EndpointSpec::Proton(spec) => runtime
+            .proton_accounts
+            .get(&spec.account)
+            .map(|account| account.username.clone()),
         EndpointSpec::StaticWireGuard(_) => None,
     }
 }

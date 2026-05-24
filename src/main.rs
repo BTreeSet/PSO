@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use pso::accounts::{ProtonAccount, ProtonAccountRegistry, require_single_account_access_token};
 use pso::api::ProtonApiClient;
-use pso::auth::{calculate_srp_proof, resolve_two_factor_code};
 use pso::cli::{
     AuthCommand, Cli, Command, ControlPlaneArgs, FetchLogicalsArgs, HealthCommand, LoginArgs,
     ProbeArgs, ProviderListArgs, ProvidersArgs, ProvidersCommand, RefreshVpnTokenArgs, RenderArgs,
@@ -13,21 +13,19 @@ use pso::cli::{
 };
 use pso::config::{
     AppConfig, AuthConfig, ControlPlaneDefaults, DEFAULT_API_BASE_URL, DEFAULT_STATE_DIR,
-    RenderConfig, RuntimeContext, SessionEntry, TopologyConfig, read_json, read_optional_config,
+    RuntimeContext, TopologyConfig, read_json, read_optional_config,
 };
 use pso::control_plane::{ControlPlane, ControlPlaneConfig};
-use pso::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use pso::health::HealthMonitor;
 use pso::model::{PhysicalServer, ProtonLogicalResponse};
 use pso::process::{find_process_pid, find_process_pid_by_exe};
+use pso::proton::{
+    CachedAccessToken, login_configured_account, login_with_prompts, persist_vpn_session,
+    refresh_stored_vpn_session,
+};
 use pso::provider::known_wireguard_providers;
-use pso::provisioning::LocalKeyProvisioner;
-use pso::session::{SessionStore, UserSession};
 use pso::state::{StateStore, topology_state_file, write_state_file};
 use pso::supervisor::{SupervisorOptions, run_supervisor};
-use pso::template::hydrate_template;
-use serde_json::Value;
-use tracing::info;
 
 mod state_cli;
 
@@ -52,7 +50,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Run(args) => run(&context, &config, args).await,
-        Command::Render(args) => render(&config.render, args).await,
+        Command::Render(args) => render(&context, &config, args).await,
         Command::Health(args) => match args.command {
             HealthCommand::Baseline => {
                 let ip = HealthMonitor::acquire_baseline().await?;
@@ -61,13 +59,17 @@ async fn main() -> Result<()> {
             }
             HealthCommand::Probe(args) => probe(args).await,
         },
-        Command::ControlPlane(args) => control_plane(&context, &config.control_plane, args).await,
+        Command::ControlPlane(args) => {
+            control_plane(&context, &config.auth, &config.control_plane, args).await
+        }
         Command::Auth(args) => match args.command {
             AuthCommand::Login(args) => login(&context, &config.auth, args).await,
             AuthCommand::Refresh(args) => refresh_vpn_token(&context, &config.auth, args).await,
         },
         Command::Topology(args) => match args.command {
-            TopologyCommand::Fetch(args) => fetch_logicals(&context, &config.topology, args).await,
+            TopologyCommand::Fetch(args) => {
+                fetch_logicals(&context, &config.auth, &config.topology, args).await
+            }
         },
         Command::Providers(args) => providers(args),
         Command::State(args) => state_cli::run_state(&context, args),
@@ -114,63 +116,43 @@ async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Res
     .await
 }
 
-async fn render(config: &RenderConfig, args: RenderArgs) -> Result<()> {
-    let template_path = args
-        .template
-        .or(config.template.clone())
-        .unwrap_or_else(|| PathBuf::from("config.template.json"));
-    let topology_path = args
-        .topology
-        .or(config.topology.clone())
-        .unwrap_or_else(|| PathBuf::from("proton-logicals.json"));
-    let output_path = args
-        .output
-        .or(config.output.clone())
-        .unwrap_or_else(|| PathBuf::from("rendered.config.json.tmp"));
-    let active_config = args.active_config.or(config.active_config.clone());
-    let singbox_pid = args.singbox_pid.or(config.singbox_pid);
-    let singbox_bin = args
-        .singbox_bin
-        .or(config.singbox_bin.clone())
-        .unwrap_or_else(|| PathBuf::from("sing-box"));
-    let resolved_sessions = resolve_sessions(args.sessions, &config.sessions)?;
-    let dry_run = args.dry_run || config.dry_run.unwrap_or(false);
-
-    let template: Value = read_json(&template_path)?;
-    let topology_response: ProtonLogicalResponse = read_json(&topology_path)?;
-    let sessions = SessionStore::new();
-    for (username, tier) in resolved_sessions {
-        sessions.insert(UserSession::new(username, tier));
+async fn render(context: &RuntimeContext, config: &AppConfig, args: RenderArgs) -> Result<()> {
+    let mut render_config = config.clone();
+    if let Some(template) = args.template {
+        render_config.render.template = Some(template);
+    }
+    if let Some(topology) = args.topology {
+        render_config.render.topology = Some(topology);
+    }
+    if let Some(output) = args.output {
+        render_config.render.output = Some(output);
+    }
+    if let Some(active_config) = args.active_config {
+        render_config.render.active_config = Some(active_config);
+    }
+    if let Some(singbox_pid) = args.singbox_pid {
+        render_config.render.singbox_pid = Some(singbox_pid);
+    }
+    if let Some(singbox_bin) = args.singbox_bin {
+        render_config.render.singbox_bin = Some(singbox_bin);
+    }
+    if args.dry_run {
+        render_config.render.dry_run = Some(true);
     }
 
-    let provisioner = LocalKeyProvisioner::default();
-    let rendered = hydrate_template(
-        &template,
-        &sessions,
-        &topology_response.into_servers(),
-        &provisioner,
-    )?;
-    let rendered_text = serde_json::to_string_pretty(&rendered)?;
-    fs::write(&output_path, rendered_text)
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-    info!(path = %output_path.display(), "rendered hydrated sing-box config");
-
-    if dry_run {
-        return Ok(());
-    }
-
-    validate_singbox_config(&singbox_bin, &output_path).await?;
-    if let (Some(active_config), Some(singbox_pid)) = (active_config, singbox_pid) {
-        deploy_with_sighup(&DeployPlan {
-            singbox_bin,
-            rendered_tmp: output_path,
-            active_config,
-            singbox_pid,
-        })
-        .await?;
-    }
-
-    Ok(())
+    let interval = Duration::from_secs(render_config.run.interval_secs.unwrap_or(300));
+    run_supervisor(
+        context,
+        &render_config,
+        SupervisorOptions {
+            access_token: None,
+            raw_ip: None,
+            proxy_url: render_config.run.proxy_url.clone(),
+            once: true,
+            interval,
+        },
+    )
+    .await
 }
 
 async fn probe(args: ProbeArgs) -> Result<()> {
@@ -191,6 +173,7 @@ async fn probe(args: ProbeArgs) -> Result<()> {
 
 async fn control_plane(
     context: &RuntimeContext,
+    auth: &AuthConfig,
     config: &ControlPlaneDefaults,
     args: ControlPlaneArgs,
 ) -> Result<()> {
@@ -210,11 +193,14 @@ async fn control_plane(
         .endpoint
         .or(config.endpoint.clone())
         .context("endpoint is required; pass --endpoint or set control_plane.endpoint")?;
+    let account = args.account.or(config.account.clone());
+    let access_token =
+        resolve_manual_access_token(context, auth, args.access_token, account.as_deref()).await?;
     let api = ProtonApiClient::new(&context.api_base_url)?;
     let control_plane = ControlPlane::new(api);
     control_plane
         .run_refresh_loop(ControlPlaneConfig {
-            access_token: args.access_token,
+            access_token,
             active_config,
             singbox_pid,
             outbound_tag: args
@@ -242,17 +228,21 @@ async fn control_plane(
 
 async fn fetch_logicals(
     context: &RuntimeContext,
+    auth: &AuthConfig,
     config: &TopologyConfig,
     args: FetchLogicalsArgs,
 ) -> Result<()> {
     let api = ProtonApiClient::new(&context.api_base_url)?;
     let state_logicals = topology_state_file(context);
+    let account = args.account.or(config.account.clone());
+    let access_token =
+        resolve_manual_access_token(context, auth, args.access_token, account.as_deref()).await?;
     let fallback_topology = args
         .fallback_topology
         .as_ref()
         .or(config.fallback_topology.as_ref());
     let require_live = args.require_live || config.require_live.unwrap_or(false);
-    match api.get_logicals(&args.access_token).await {
+    match api.get_logicals(&access_token).await {
         Ok(logicals) => {
             let value = serde_json::json!({ "LogicalServers": logicals });
             let text = serde_json::to_string_pretty(&value)?;
@@ -306,76 +296,67 @@ fn write_logicals_from_available_state(
 }
 
 async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -> Result<()> {
-    let username = args
-        .username
-        .or(config.username.clone())
-        .context("username is required; pass --username or set auth.username in config")?;
-    let password = match args.password.or(config.password.clone()) {
-        Some(password) => password,
-        None => match args.password_file.or(config.password_file.clone()) {
-            Some(path) => fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?
-                .trim_end_matches(['\r', '\n'])
-                .to_string(),
-            None if !(args.no_prompt || config.no_prompt.unwrap_or(false)) => {
-                rpassword::prompt_password("Proton password: ")?
-            }
-            None => anyhow::bail!(
-                "password is required; pass --password, PSO_PROTON_PASSWORD, --password-file, or PSO_PROTON_PASSWORD_FILE"
-            ),
-        },
-    };
-
-    let api = ProtonApiClient::new(&context.api_base_url)?;
-    let info = api
-        .auth_info(&username, args.human_verification_token.as_deref())
-        .await?;
-    if info.version != 4 {
-        anyhow::bail!("unsupported Proton SRP auth version {}", info.version);
-    }
-
-    let totp_arg = args.totp.or(config.totp.clone());
-    let no_prompt = args.no_prompt || config.no_prompt.unwrap_or(false);
-    let two_factor_input = if info.two_factor.unwrap_or(0) > 0 && totp_arg.is_none() && !no_prompt {
-        Some(rpassword::prompt_password("Proton TOTP: ")?)
-    } else if info.two_factor.unwrap_or(0) > 0 && totp_arg.is_none() {
-        anyhow::bail!("TOTP is required for this account; pass --totp or PSO_PROTON_TOTP")
-    } else {
-        totp_arg
-    };
-    let totp = two_factor_input
-        .as_deref()
-        .map(resolve_two_factor_code)
-        .transpose()?;
-
-    let proof = calculate_srp_proof(
-        &username,
-        &password,
-        &info.salt,
-        &info.modulus,
-        &info.server_ephemeral,
-    )?;
-    let primary = api
-        .authenticate(
-            &username,
-            &proof,
-            &info.modulus,
-            totp.as_deref(),
+    let registry = ProtonAccountRegistry::from_auth(config)?;
+    let vpn = if let Some(account_name) = args.account.as_deref() {
+        let account = registry.get_required(account_name)?;
+        ensure_username_matches_account(args.username.as_deref(), account)?;
+        let vpn = login_configured_account(
+            context,
+            account,
+            args.password,
+            args.totp,
             args.human_verification_token.as_deref(),
         )
         .await?;
-    let vpn = api.fork_vpn_session(&primary.access_token, None).await?;
-
-    let uid = vpn
-        .uid
-        .clone()
-        .or(primary.uid.clone())
-        .context("Proton login response did not include UID for session state")?;
-    StateStore::open(context)?.store_vpn_session(&username, &uid, &vpn.refresh_token)?;
+        persist_vpn_session(context, &account.username, None, &vpn)?;
+        vpn
+    } else if let Some(username) = args.username {
+        if let Some(account) = registry.get_by_username(&username) {
+            let vpn = login_configured_account(
+                context,
+                account,
+                args.password,
+                args.totp,
+                args.human_verification_token.as_deref(),
+            )
+            .await?;
+            persist_vpn_session(context, &account.username, None, &vpn)?;
+            vpn
+        } else {
+            let password = resolve_cli_password(args.password, args.password_file, args.no_prompt)?;
+            let vpn = login_with_prompts(
+                context,
+                &username,
+                password,
+                args.totp,
+                args.no_prompt,
+                args.human_verification_token.as_deref(),
+            )
+            .await?;
+            persist_vpn_session(context, &username, None, &vpn)?;
+            vpn
+        }
+    } else if registry.len() == 1 {
+        let account = registry
+            .iter()
+            .next()
+            .context("missing configured Proton account")?;
+        let vpn = login_configured_account(
+            context,
+            account,
+            args.password,
+            args.totp,
+            args.human_verification_token.as_deref(),
+        )
+        .await?;
+        persist_vpn_session(context, &account.username, None, &vpn)?;
+        vpn
+    } else {
+        anyhow::bail!("a Proton account is required; pass --account or --username")
+    };
 
     if let Some(output) = args.output {
-        fs::write(&output, serde_json::to_string_pretty(&vpn)?)
-            .with_context(|| format!("failed to write {}", output.display()))?;
+        write_json_output(&output, &vpn)?;
     } else {
         println!("{}", serde_json::to_string_pretty(&vpn)?);
     }
@@ -388,22 +369,28 @@ async fn refresh_vpn_token(
     config: &AuthConfig,
     args: RefreshVpnTokenArgs,
 ) -> Result<()> {
-    let username = args
-        .username
-        .or(config.username.clone())
-        .context("username is required; pass --username or set auth.username in config")?;
+    let registry = ProtonAccountRegistry::from_auth(config)?;
+    let username = if let Some(account_name) = args.account.as_deref() {
+        registry.get_required(account_name)?.username.clone()
+    } else if let Some(username) = args.username {
+        username
+    } else if registry.len() == 1 {
+        registry
+            .iter()
+            .next()
+            .context("missing configured Proton account")?
+            .username
+            .clone()
+    } else {
+        anyhow::bail!("a Proton account is required; pass --account or --username")
+    };
     let store = StateStore::open(context)?;
     let state = store.load_vpn_session(&username)?;
-    let api = ProtonApiClient::new(&context.api_base_url)?;
-    let refreshed = api
-        .refresh_session(&state.uid, &state.refresh_token)
-        .await?;
-    let uid = refreshed.uid.as_deref().unwrap_or(&state.uid);
-    store.store_vpn_session(&username, uid, &refreshed.refresh_token)?;
+    let refreshed = refresh_stored_vpn_session(context, &state).await?;
+    persist_vpn_session(context, &username, Some(&state.uid), &refreshed)?;
 
     if let Some(output) = args.output {
-        fs::write(&output, serde_json::to_string_pretty(&refreshed)?)
-            .with_context(|| format!("failed to write {}", output.display()))?;
+        write_json_output(&output, &refreshed)?;
     } else {
         println!("{}", serde_json::to_string_pretty(&refreshed)?);
     }
@@ -411,23 +398,65 @@ async fn refresh_vpn_token(
     Ok(())
 }
 
-fn resolve_sessions(
-    cli_sessions: Vec<(String, String)>,
-    config_sessions: &[SessionEntry],
-) -> Result<Vec<(String, String)>> {
-    if !cli_sessions.is_empty() {
-        return Ok(cli_sessions);
-    }
-    let sessions: Vec<_> = config_sessions
-        .iter()
-        .map(|session| (session.username.clone(), session.tier.clone()))
-        .collect();
-    if sessions.is_empty() {
+fn ensure_username_matches_account(username: Option<&str>, account: &ProtonAccount) -> Result<()> {
+    if let Some(username) = username
+        && username != account.username
+    {
         anyhow::bail!(
-            "at least one render session is required; pass --session username:tier or set render.sessions in config"
-        )
+            "configured Proton account '{}' uses username {}; remove --username or use the matching value",
+            account.name,
+            account.username
+        );
     }
-    Ok(sessions)
+    Ok(())
+}
+
+fn resolve_cli_password(
+    password: Option<String>,
+    password_file: Option<PathBuf>,
+    no_prompt: bool,
+) -> Result<String> {
+    match password {
+        Some(password) => Ok(password),
+        None => match password_file {
+            Some(path) => Ok(fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?
+                .trim_end_matches(['\r', '\n'])
+                .to_string()),
+            None if !no_prompt => Ok(rpassword::prompt_password("Proton password: ")?),
+            None => anyhow::bail!(
+                "password is required; pass --password, PSO_PROTON_PASSWORD, --password-file, or PSO_PROTON_PASSWORD_FILE"
+            ),
+        },
+    }
+}
+
+async fn resolve_manual_access_token(
+    context: &RuntimeContext,
+    auth: &AuthConfig,
+    access_token: Option<String>,
+    account_name: Option<&str>,
+) -> Result<String> {
+    let registry = ProtonAccountRegistry::from_auth(auth)?;
+    if let Some(access_token) = access_token {
+        require_single_account_access_token(&registry, account_name)?;
+        return Ok(access_token);
+    }
+
+    if registry.is_empty() {
+        anyhow::bail!(
+            "a Proton access token is required; pass --access-token or configure auth.proton.accounts"
+        );
+    }
+
+    let account = registry.resolve_selector(account_name, None)?;
+    let mut cache = CachedAccessToken::default();
+    pso::ensure_account_access_token(context, account, &mut cache).await
+}
+
+fn write_json_output(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    fs::write(path, serde_json::to_string_pretty(value)?)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn resolve_singbox_pid(singbox_bin: &Path) -> Result<i32> {

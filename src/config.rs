@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::provider::ProvidersConfig;
@@ -31,7 +31,55 @@ pub struct AppConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
-    pub username: Option<String>,
+    pub proton: ProtonAuthConfig,
+}
+
+impl AuthConfig {
+    pub fn validate(&self) -> Result<()> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut usernames = std::collections::BTreeSet::new();
+        for account in &self.proton.accounts {
+            let name = account.name.trim();
+            if name.is_empty() {
+                bail!("auth.proton.accounts entries must have a non-empty name");
+            }
+            if !names.insert(name.to_string()) {
+                bail!("duplicate Proton account name '{name}'");
+            }
+
+            let username = account.username.trim();
+            if username.is_empty() {
+                bail!("auth.proton.accounts entry '{name}' must have a non-empty username");
+            }
+            if !usernames.insert(username.to_string()) {
+                bail!("duplicate Proton username '{username}' in auth.proton.accounts");
+            }
+
+            if account.tier.trim().is_empty() {
+                bail!("auth.proton.accounts entry '{name}' must declare a tier");
+            }
+            if account.password.is_some() && account.password_file.is_some() {
+                bail!(
+                    "auth.proton.accounts entry '{name}' cannot set both password and password_file"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ProtonAuthConfig {
+    pub accounts: Vec<ProtonAccountConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ProtonAccountConfig {
+    pub name: String,
+    pub username: String,
+    pub tier: String,
     pub password: Option<String>,
     pub password_file: Option<PathBuf>,
     pub totp: Option<String>,
@@ -41,6 +89,7 @@ pub struct AuthConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TopologyConfig {
+    pub account: Option<String>,
     pub fallback_topology: Option<PathBuf>,
     pub require_live: Option<bool>,
 }
@@ -54,19 +103,13 @@ pub struct RenderConfig {
     pub active_config: Option<PathBuf>,
     pub singbox_pid: Option<i32>,
     pub singbox_bin: Option<PathBuf>,
-    pub sessions: Vec<SessionEntry>,
     pub dry_run: Option<bool>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct SessionEntry {
-    pub username: String,
-    pub tier: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ControlPlaneDefaults {
+    pub account: Option<String>,
     pub active_config: Option<PathBuf>,
     pub singbox_pid: Option<i32>,
     pub singbox_bin: Option<PathBuf>,

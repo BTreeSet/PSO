@@ -46,9 +46,10 @@ fn hydrate_outbound(
         .ok_or_else(|| anyhow!("proton outbound is missing tag"))?
         .to_string();
     let username = object
-        .get("user")
+        .get("account")
+        .or_else(|| object.get("user"))
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("proton outbound {tag} is missing user"))?
+        .ok_or_else(|| anyhow!("proton outbound {tag} is missing account"))?
         .to_string();
     let filter_value = object
         .get("filter")
@@ -105,7 +106,7 @@ mod tests {
                 "type": "wireguard",
                 "tag": "proton-free-jp",
                 "provider": "proton",
-                "user": "bob@example.com",
+                "account": "bob@example.com",
                 "filter": { "country": ["JP"], "tier": "Free" }
             }]
         });

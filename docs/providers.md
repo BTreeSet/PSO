@@ -21,21 +21,14 @@ The WireGuard-capable provider surface tracked from Gluetun research is:
 | Provider | PSO mode | Notes |
 | --- | --- | --- |
 | Proton | dynamic API | Native SRP login, VPN session refresh, topology fetch, certificate registration, local key generation. |
-| AirVPN | static catalog | Declare endpoint, port, peer public key, assigned address, and filters. |
+| AirVPN | static catalog | Declare endpoint, non-default WireGuard port, peer public key, assigned address, and filters. |
 | FastestVPN | static catalog | Declare provider-issued WireGuard endpoint metadata. |
 | IVPN | static catalog | Declare alternate WireGuard ports where needed. |
 | Mullvad | static catalog | Supports WireGuard peer `reserved` bytes. |
 | NordVPN | static catalog | Declare NordLynx/WireGuard endpoint metadata. |
 | Surfshark | static catalog | Declare endpoint metadata and filter by location/features. |
-| Windscribe | static catalog | Declare alternate WireGuard ports where needed. |
+| Windscribe | static catalog | Declare provider-specific WireGuard ports and peer public keys from the provider catalog. |
 | Custom | static catalog | Use for any provider with known WireGuard endpoint metadata. |
-| CyberGhost | static catalog | Supported when provider-issued WireGuard endpoint metadata is supplied. |
-| Private Internet Access | static catalog | Supported as `pia` when provider-issued WireGuard endpoint metadata is supplied. |
-| PrivateVPN | static catalog | Supported when provider-issued WireGuard endpoint metadata is supplied. |
-| PureVPN | static catalog | Supported when provider-issued WireGuard endpoint metadata is supplied. |
-| TorGuard | static catalog | Supported when provider-issued WireGuard endpoint metadata is supplied. |
-| VPN Unlimited | static catalog | Supported as `vpnunlimited` when provider-issued WireGuard endpoint metadata is supplied. |
-| VyprVPN | static catalog | Supported when provider-issued WireGuard endpoint metadata is supplied. |
 
 Providers that only expose OpenVPN are intentionally not modeled because PSO renders sing-box WireGuard endpoints only.
 
@@ -102,7 +95,7 @@ Proton endpoints remain dynamic and use the Proton-specific filter model:
   "type": "wireguard",
   "tag": "proton-p2p-nl",
   "provider": "proton",
-  "user": "alice@example.com",
+  "account": "alice-plus",
   "filter": {
     "country": ["NL"],
     "tier": "Plus",
@@ -110,6 +103,8 @@ Proton endpoints remain dynamic and use the Proton-specific filter model:
   }
 }
 ```
+
+`account` references a named entry in `auth.proton.accounts`. One active Proton endpoint should map to one configured Proton account so the operator can scale out across several Proton identities cleanly.
 
 ## State and Rendering
 
@@ -124,4 +119,4 @@ pso --state-dir /var/lib/pso state wireguard --json
 
 PSO renders the sing-box 1.11+ WireGuard endpoint shape: `endpoints`, `address`, and `peers`. Peer domains should be paired with a `domain_resolver` in the template. `listen_port` must not be combined with `detour` for WireGuard endpoints.
 
-PSO validates the rendered config with `sing-box check`, atomically replaces the target config, and sends SIGHUP to the configured deployment target. WireGuard endpoint changes are safest when that target recreates the sing-box process or otherwise reloads endpoints according to the deployed sing-box version's lifecycle behavior.
+PSO validates the rendered config with `sing-box check`, atomically replaces the target config, and sends SIGHUP to the configured deployment target. On sing-box 1.13.x, WireGuard endpoints are recreated on reload rather than hot-patched in place, so PSO keeps WireGuard key and endpoint state external in SQLite and treats SIGHUP as a full endpoint refresh boundary.

@@ -6,7 +6,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use crate::config::{RenderConfig, RuntimeContext, SessionEntry};
+use crate::accounts::ProtonAccountRegistry;
+use crate::config::{RenderConfig, RuntimeContext};
 use crate::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use crate::filter::ServerFilter;
 use crate::process::{find_process_pid, find_process_pid_by_exe};
@@ -19,9 +20,7 @@ use crate::supervisor::{
 };
 
 pub(crate) async fn render_and_deploy(runtime: &SupervisorRuntime) -> Result<()> {
-    let mut rendered = runtime.template.clone();
-    let states = wireguard_states_by_tag(&runtime.context, &runtime.specs)?;
-    hydrate_wireguard_entries(&mut rendered, &states)?;
+    let rendered = render_from_state(&runtime.template, &runtime.context, &runtime.specs)?;
 
     let output_path = rendered_output_path(&runtime.context, &runtime.render);
     if let Some(parent) = output_path.parent() {
@@ -151,11 +150,11 @@ fn parse_proton_spec(
     tag: String,
     health_proxy_url: Option<String>,
 ) -> Result<ProtonEndpointSpec> {
-    let username = object
-        .get("user")
-        .or_else(|| object.get("account"))
+    let account = object
+        .get("account")
+        .or_else(|| object.get("user"))
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("proton wireguard entry {tag} is missing user/account"))?
+        .ok_or_else(|| anyhow!("proton wireguard entry {tag} is missing account"))?
         .to_string();
     let filter: ServerFilter = serde_json::from_value(
         object
@@ -167,7 +166,7 @@ fn parse_proton_spec(
 
     Ok(ProtonEndpointSpec {
         tag,
-        username,
+        account,
         filter,
         health_proxy_url,
     })
@@ -216,36 +215,32 @@ fn parse_static_spec(
     })
 }
 
-pub(crate) fn session_map(entries: &[SessionEntry]) -> Result<BTreeMap<String, UserSession>> {
-    if entries.is_empty() {
-        anyhow::bail!("run requires render.sessions to declare account tiers")
+pub(crate) fn account_sessions(
+    registry: &ProtonAccountRegistry,
+) -> Result<BTreeMap<String, UserSession>> {
+    if registry.is_empty() {
+        anyhow::bail!("Proton endpoints require auth.proton.accounts to declare account tiers")
     }
-    Ok(entries
-        .iter()
-        .map(|entry| {
-            (
-                entry.username.clone(),
-                UserSession::new(entry.username.clone(), entry.tier.clone()),
-            )
-        })
-        .collect())
+    Ok(registry.sessions())
 }
 
-pub(crate) fn ensure_sessions_exist(
-    specs: &[EndpointSpec],
-    sessions: &BTreeMap<String, UserSession>,
+pub(crate) fn canonicalize_proton_accounts(
+    specs: &mut [EndpointSpec],
+    registry: &ProtonAccountRegistry,
 ) -> Result<()> {
+    let mut assigned_accounts = BTreeSet::new();
     for spec in specs {
         let EndpointSpec::Proton(spec) = spec else {
             continue;
         };
-        if !sessions.contains_key(&spec.username) {
+        let account = registry.resolve_template_reference(&spec.account)?;
+        if !assigned_accounts.insert(account.name.clone()) {
             anyhow::bail!(
-                "template endpoint {} uses {}, but render.sessions has no tier for that account",
-                spec.tag,
-                spec.username
+                "Proton account '{}' is assigned to more than one endpoint; provision one account per active Proton endpoint",
+                account.name
             );
         }
+        spec.account = account.name.clone();
     }
     Ok(())
 }
@@ -286,6 +281,17 @@ fn wireguard_states_by_tag(
             Ok((tag.to_string(), state))
         })
         .collect()
+}
+
+pub(crate) fn render_from_state(
+    template: &Value,
+    context: &RuntimeContext,
+    specs: &[EndpointSpec],
+) -> Result<Value> {
+    let mut rendered = template.clone();
+    let states = wireguard_states_by_tag(context, specs)?;
+    hydrate_wireguard_entries(&mut rendered, &states)?;
+    Ok(rendered)
 }
 
 fn hydrate_wireguard_entries(
