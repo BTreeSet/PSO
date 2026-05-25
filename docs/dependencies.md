@@ -14,6 +14,7 @@ The current direct runtime dependency graph was captured with `cargo tree -e nor
 - `libc 0.2.186`: POSIX `SIGHUP` signaling.
 - `num-bigint 0.4.6`, `num-traits 0.2.19`: SRP big integer arithmetic.
 - `parking_lot 0.12.5`: in-memory session store locking.
+- `pgp 0.19.0`: OpenPGP cleartext-signature verification for Proton's signed SRP modulus, with default features disabled to avoid unused compression support.
 - `rand_core 0.6.4`: RNG trait version required by `x25519-dalek`.
 - `reqwest 0.13.3`: Proton HTTP client, with only `json`, `query`, and `rustls` features enabled.
 - `rpassword 7.5.3`: hidden password/TOTP prompt for rare interactive CLI runs.
@@ -45,6 +46,7 @@ This is an accepted temporary cost of using current `bcrypt`/`tempfile` while ke
 ## Supply Chain Posture
 
 - `Cargo.lock` is committed and Docker builds use `cargo build --release --locked`.
+- `pgp` is built with `default-features = false`; PSO uses it only for Proton modulus signature verification and does not need optional bzip2 armor support.
 - `reqwest` is built with `default-features = false` and only the features PSO uses: `json`, `query`, `rustls`.
 - Native OpenSSL is avoided in the PSO binary; the Alpine runtime installs only `bash`, `tzdata`, `ca-certificates`, and `nftables` plus bundled `sing-box`.
 - Desktop keyring integration was removed. Headless deployments use `pso.sqlite3` plus explicit files under the PSO state directory, typically backed by a mounted Docker volume.

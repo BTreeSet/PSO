@@ -8,7 +8,7 @@ use tempfile::NamedTempFile;
 use tokio::time;
 use tracing::{error, info, warn};
 
-use crate::api::{CertificateRequest, ProtonApiClient};
+use crate::api::{CertificateRequest, ProtonAccessToken, ProtonApiClient};
 use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::model::PhysicalServer;
 use crate::process::sighup_process;
@@ -18,7 +18,7 @@ use crate::singbox_adapter::build_wireguard_endpoint;
 
 #[derive(Clone, Debug)]
 pub struct ControlPlaneConfig {
-    pub access_token: String,
+    pub access_token: ProtonAccessToken,
     pub active_config: PathBuf,
     pub singbox_pid: i32,
     pub outbound_tag: String,

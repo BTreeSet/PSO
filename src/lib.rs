@@ -24,7 +24,7 @@ mod supervisor_render;
 pub mod template;
 
 pub use accounts::{ProtonAccount, ProtonAccountRegistry, require_single_account_access_token};
-pub use api::{CertificateRequest, CertificateResponse, ProtonApiClient};
+pub use api::{CertificateRequest, CertificateResponse, ProtonAccessToken, ProtonApiClient};
 pub use auth::{SrpProof, calculate_srp_proof, resolve_two_factor_code};
 pub use control_plane::{CertificateRefreshOutcome, ControlPlane, ControlPlaneConfig};
 pub use crypto::{KeyMaterial, generate_key_material};

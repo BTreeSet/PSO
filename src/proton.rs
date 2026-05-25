@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose};
 
 use crate::accounts::ProtonAccount;
-use crate::api::{AuthTokens, ProtonApiClient};
+use crate::api::{AuthTokens, ProtonAccessToken, ProtonApiClient};
 use crate::auth::{calculate_srp_proof, resolve_two_factor_code};
 use crate::config::RuntimeContext;
 use crate::state::{ProtonSessionState, StateStore};
@@ -13,19 +14,25 @@ pub const PROTON_WIREGUARD_KEEPALIVE_INTERVAL: u16 = 60;
 #[derive(Clone, Debug, Default)]
 pub struct CachedAccessToken {
     pub access_token: Option<String>,
+    pub uid: Option<String>,
     pub expires_at_ms: Option<i64>,
 }
 
 impl CachedAccessToken {
-    pub fn fresh_token(&self) -> Option<String> {
+    pub fn fresh_token(&self) -> Option<ProtonAccessToken> {
         let expires_at_ms = self.expires_at_ms?;
         let access_token = self.access_token.as_ref()?;
         (expires_at_ms > current_time_ms() + ACCESS_TOKEN_REFRESH_MARGIN_MS)
-            .then(|| access_token.clone())
+            .then(|| ProtonAccessToken::new(access_token.clone(), self.uid.clone()))
     }
 
-    pub fn store(&mut self, tokens: &AuthTokens) {
+    pub fn store(&mut self, tokens: &AuthTokens, fallback_uid: Option<&str>) {
         self.access_token = Some(tokens.access_token.clone());
+        self.uid = tokens
+            .uid
+            .clone()
+            .or_else(|| fallback_uid.map(ToOwned::to_owned))
+            .or_else(|| self.uid.clone());
         self.expires_at_ms = tokens
             .expires_in
             .map(|seconds| current_time_ms() + seconds as i64 * 1000);
@@ -153,7 +160,7 @@ pub async fn ensure_account_access_token(
     context: &RuntimeContext,
     account: &ProtonAccount,
     cache: &mut CachedAccessToken,
-) -> Result<String> {
+) -> Result<ProtonAccessToken> {
     if let Some(token) = cache.fresh_token() {
         return Ok(token);
     }
@@ -163,8 +170,8 @@ pub async fn ensure_account_access_token(
         Ok(state) => match refresh_stored_proton_session(context, &state).await {
             Ok(tokens) => {
                 persist_proton_session(context, &account.username, Some(&state.uid), &tokens)?;
-                cache.store(&tokens);
-                Ok(tokens.access_token)
+                cache.store(&tokens, Some(&state.uid));
+                Ok(ProtonAccessToken::from_tokens(&tokens, Some(&state.uid)))
             }
             Err(_refresh_error) => {
                 if account.no_prompt {
@@ -179,8 +186,8 @@ pub async fn ensure_account_access_token(
                         )
                     })?;
                 persist_proton_session(context, &account.username, None, &tokens)?;
-                cache.store(&tokens);
-                Ok(tokens.access_token)
+                cache.store(&tokens, None);
+                Ok(ProtonAccessToken::from_tokens(&tokens, None))
             }
         },
         Err(_) => {
@@ -189,8 +196,8 @@ pub async fn ensure_account_access_token(
             }
             let tokens = login_configured_account(context, account, None, None, None).await?;
             persist_proton_session(context, &account.username, None, &tokens)?;
-            cache.store(&tokens);
-            Ok(tokens.access_token)
+            cache.store(&tokens, None);
+            Ok(ProtonAccessToken::from_tokens(&tokens, None))
         }
     }
 }
@@ -208,8 +215,17 @@ pub fn proton_wireguard_assigned_ips() -> Vec<String> {
 
 fn verify_server_proof(server_proof: Option<&str>, expected_server_proof: &str) -> Result<()> {
     let server_proof = server_proof.context("Proton auth response did not include ServerProof")?;
-    if server_proof != expected_server_proof {
+    let received = decode_proof(server_proof, "Proton auth response ServerProof")?;
+    let expected = decode_proof(expected_server_proof, "generated Proton server proof")?;
+    if received != expected {
         bail!("Proton auth response returned an unexpected server proof");
     }
     Ok(())
+}
+
+fn decode_proof(value: &str, label: &str) -> Result<Vec<u8>> {
+    general_purpose::STANDARD
+        .decode(value)
+        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(value))
+        .with_context(|| format!("invalid {label}"))
 }

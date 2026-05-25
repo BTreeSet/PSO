@@ -9,7 +9,7 @@ use tokio::time::sleep;
 use tracing::{error, warn};
 
 use crate::accounts::ProtonAccountRegistry;
-use crate::api::{CertificateRequest, CertificateResponse, ProtonApiClient};
+use crate::api::{CertificateRequest, CertificateResponse, ProtonAccessToken, ProtonApiClient};
 use crate::config::{AppConfig, RenderConfig, RuntimeContext, TopologyConfig, read_json};
 use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::filter::{ServerFilter, select_target};
@@ -483,7 +483,7 @@ async fn ensure_certificate(
     spec: &ProtonEndpointSpec,
     username: &str,
     server: &PhysicalServer,
-    access_token: &str,
+    access_token: &ProtonAccessToken,
     force_refresh: bool,
 ) -> Result<bool> {
     let store = StateStore::open(&runtime.context)?;
@@ -662,14 +662,17 @@ fn load_topology(runtime: &SupervisorRuntime) -> Result<Vec<LogicalServer>> {
 async fn access_token_for_account(
     runtime: &SupervisorRuntime,
     account_name: &str,
-) -> Result<String> {
+) -> Result<ProtonAccessToken> {
     if let Some(access_token) = &runtime.options.access_token {
         if runtime.proton_accounts.len() > 1 {
             anyhow::bail!(
                 "--access-token/PSO_PROTON_ACCESS_TOKEN cannot be shared across multiple Proton accounts; configure per-account credentials or stored sessions"
             );
         }
-        return Ok(access_token.clone());
+        return Ok(ProtonAccessToken::new(
+            access_token.clone(),
+            stored_uid_for_account(runtime, account_name),
+        ));
     }
 
     let token_state = runtime
@@ -711,6 +714,15 @@ fn endpoint_username(runtime: &SupervisorRuntime, spec: &EndpointSpec) -> Option
             .map(|account| account.username.clone()),
         EndpointSpec::StaticWireGuard(_) => None,
     }
+}
+
+fn stored_uid_for_account(runtime: &SupervisorRuntime, account_name: &str) -> Option<String> {
+    let account = runtime.proton_accounts.get(account_name)?;
+    StateStore::open(&runtime.context)
+        .ok()?
+        .load_proton_session(&account.username)
+        .ok()
+        .map(|state| state.uid)
 }
 
 fn stable_server_id(server: &PhysicalServer) -> String {

@@ -5,14 +5,21 @@ use base64::{Engine as _, engine::general_purpose};
 use bcrypt::Version;
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
+use pgp::composed::{CleartextSignedMessage, Deserializable, SignedPublicKey};
 use rand_core::{OsRng, RngCore};
 use sha1::Sha1;
 use sha2::{Digest, Sha512};
 
-const SRP_LEN: usize = 2048 / 8;
+const SRP_MODULUS_BITS: usize = 2048;
+const SRP_LEN: usize = SRP_MODULUS_BITS / 8;
 const MAX_VALUE_ITERATIONS: usize = 1000;
 const BCRYPT_COST: u32 = 10;
 const BCRYPT_SALT_SUFFIX: &[u8] = b"proton";
+const SRP_GENERATOR: u8 = 2;
+const SRP_PRIMALITY_ROUNDS: usize = 10;
+const SRP_CLIENT_SECRET_LOWER_BOUND: u64 = (SRP_MODULUS_BITS as u64) * 2;
+const SRP_MODULUS_PUBKEY: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----\r\n\r\nxjMEXAHLgxYJKwYBBAHaRw8BAQdAFurWXXwjTemqjD7CXjXVyKf0of7n9Ctm\r\nL8v9enkzggHNEnByb3RvbkBzcnAubW9kdWx1c8J3BBAWCgApBQJcAcuDBgsJ\r\nBwgDAgkQNQWFxOlRjyYEFQgKAgMWAgECGQECGwMCHgEAAPGRAP9sauJsW12U\r\nMnTQUZpsbJb53d0Wv55mZIIiJL2XulpWPQD/V6NglBd96lZKBmInSXX/kXat\r\nSv+y0io+LR8i2+jV+AbOOARcAcuDEgorBgEEAZdVAQUBAQdAeJHUz1c9+KfE\r\nkSIgcBRE3WuXC4oj5a2/U3oASExGDW4DAQgHwmEEGBYIABMFAlwBy4MJEDUF\r\nhcTpUY8mAhsMAAD/XQD8DxNI6E78meodQI+wLsrKLeHn32iLvUqJbVDhfWSU\r\nWO4BAMcm1u02t4VKw++ttECPt+HUgPUq5pqQWe5Q2cW4TMsE\r\n=Y4Mw\r\n-----END PGP PUBLIC KEY BLOCK-----";
+const MILLER_RABIN_BASES: [u32; SRP_PRIMALITY_ROUNDS] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SrpProof {
@@ -104,7 +111,7 @@ fn decode_modulus(value: &str) -> Result<Vec<u8>> {
 fn decode_binary_value(value: &str, label: &str) -> Result<Vec<u8>> {
     let trimmed = value.trim();
     if trimmed.contains("-----BEGIN PGP SIGNED MESSAGE-----") {
-        let payload = extract_clearsigned_payload(trimmed)?;
+        let payload = extract_verified_clearsigned_payload(trimmed)?;
         return decode_base64_value(&payload, label);
     }
 
@@ -123,21 +130,16 @@ fn decode_base64_value(value: &str, label: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("invalid {label}"))
 }
 
-fn extract_clearsigned_payload(message: &str) -> Result<String> {
-    let normalized = message.replace("\r\n", "\n");
-    let signature_index = normalized
-        .find("-----BEGIN PGP SIGNATURE-----")
-        .context("invalid SRP signed modulus: missing signature")?;
-    let header_end = normalized
-        .find("\n\n")
-        .context("invalid SRP signed modulus: missing cleartext body")?;
-    let cleartext = &normalized[header_end + 2..signature_index];
-    let payload = cleartext
-        .lines()
-        .filter(|line| !line.starts_with("Hash:"))
-        .map(|line| line.strip_prefix("- ").unwrap_or(line))
-        .collect::<String>();
-    let payload = strip_ascii_whitespace(&payload);
+fn extract_verified_clearsigned_payload(message: &str) -> Result<String> {
+    let (signed_message, _headers) =
+        CleartextSignedMessage::from_string(message).context("invalid SRP signed modulus")?;
+    let (modulus_key, _headers) = SignedPublicKey::from_string(SRP_MODULUS_PUBKEY)
+        .context("invalid embedded SRP modulus verification key")?;
+    signed_message
+        .verify(&modulus_key)
+        .context("invalid SRP modulus signature")?;
+
+    let payload = strip_ascii_whitespace(&signed_message.signed_text());
     if payload.is_empty() {
         bail!("invalid SRP signed modulus: empty cleartext payload");
     }
@@ -153,7 +155,7 @@ fn strip_ascii_whitespace(value: &str) -> String {
 
 fn is_hex_string(value: &str) -> bool {
     !value.is_empty()
-        && value.len() % 2 == 0
+    && value.len().is_multiple_of(2)
         && value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -196,22 +198,25 @@ fn generate_proofs(
         bail!("SRP modulus has incorrect size");
     }
 
-    let generator = BigUint::from(2_u8);
+    let generator = BigUint::from(SRP_GENERATOR);
+    let one = BigUint::one();
+    let modulus_minus_one = &modulus - &one;
     let generator_bytes = to_fixed_le_bytes(&generator, SRP_LEN)?;
     let multiplier = BigUint::from_bytes_le(&expand_hash(&[&generator_bytes, modulus_bytes]));
     let multiplier_reduced = &multiplier % &modulus;
-
-    let server_ephemeral = BigUint::from_bytes_le(server_ephemeral_bytes);
-    if server_ephemeral.is_zero() {
-        bail!("SRP server ephemeral is out of bounds");
+    if multiplier_reduced <= one || multiplier_reduced >= modulus_minus_one {
+        bail!("SRP multiplier is out of bounds");
     }
 
+    let server_ephemeral = BigUint::from_bytes_le(server_ephemeral_bytes);
+    validate_srp_parameters(&generator, &modulus, &modulus_minus_one, &server_ephemeral)?;
+
     let hashed_password = BigUint::from_bytes_le(hashed_password_bytes);
-    let modulus_minus_one = &modulus - BigUint::one();
 
     let (client_secret, client_ephemeral_bytes, scrambling_param) = get_safe_parameters(
         &generator,
         &modulus,
+        &modulus_minus_one,
         server_ephemeral_bytes,
         client_secret_override,
     )?;
@@ -245,14 +250,25 @@ fn generate_proofs(
 fn get_safe_parameters(
     generator: &BigUint,
     modulus: &BigUint,
+    modulus_minus_one: &BigUint,
     server_ephemeral_bytes: &[u8],
     client_secret_override: Option<&[u8]>,
 ) -> Result<(BigUint, Vec<u8>, BigUint)> {
+    let lower_bound = BigUint::from(SRP_CLIENT_SECRET_LOWER_BOUND);
+
     for attempt in 0..MAX_VALUE_ITERATIONS {
         let client_secret = match (attempt, client_secret_override) {
             (0, Some(bytes)) => BigUint::from_bytes_le(bytes),
             _ => generate_client_secret(),
         };
+
+        if client_secret <= lower_bound || client_secret >= *modulus_minus_one {
+            if client_secret_override.is_some() {
+                break;
+            }
+            continue;
+        }
+
         let client_ephemeral = generator.modpow(&client_secret, modulus);
         let client_ephemeral_bytes = to_fixed_le_bytes(&client_ephemeral, SRP_LEN)?;
         let scrambling_param = BigUint::from_bytes_le(&expand_hash(&[
@@ -310,6 +326,106 @@ fn mod_sub(lhs: &BigUint, rhs: &BigUint, modulus: &BigUint) -> BigUint {
     } else {
         (lhs + modulus - rhs) % modulus
     }
+}
+
+fn validate_srp_parameters(
+    generator: &BigUint,
+    modulus: &BigUint,
+    modulus_minus_one: &BigUint,
+    server_ephemeral: &BigUint,
+) -> Result<()> {
+    if generator != &BigUint::from(SRP_GENERATOR) {
+        bail!("SRP generator is unsupported");
+    }
+    if modulus.bits() != SRP_MODULUS_BITS as u64 {
+        bail!("SRP modulus has incorrect size");
+    }
+    if modulus % BigUint::from(8_u8) != BigUint::from(3_u8) {
+        bail!("SRP modulus is invalid");
+    }
+    if server_ephemeral <= &BigUint::one() || server_ephemeral >= modulus_minus_one {
+        bail!("SRP server ephemeral is out of bounds");
+    }
+
+    let half_modulus = modulus_minus_one >> 1;
+    if !is_probably_prime(&half_modulus) {
+        bail!("SRP modulus is not a safe prime");
+    }
+    if generator.modpow(&half_modulus, modulus) != *modulus_minus_one {
+        bail!("SRP modulus failed generator validation");
+    }
+
+    Ok(())
+}
+
+fn is_probably_prime(candidate: &BigUint) -> bool {
+    if *candidate < BigUint::from(2_u8) {
+        return false;
+    }
+
+    let zero = BigUint::zero();
+    let one = BigUint::one();
+    let two = BigUint::from(2_u8);
+    let candidate_minus_one = candidate - &one;
+
+    for base in MILLER_RABIN_BASES {
+        let prime = BigUint::from(base);
+        if candidate == &prime {
+            return true;
+        }
+        if candidate % &prime == zero {
+            return false;
+        }
+    }
+
+    let mut d = candidate_minus_one.clone();
+    let mut s = 0_usize;
+    while &d % &two == zero {
+        d >>= 1;
+        s += 1;
+    }
+
+    MILLER_RABIN_BASES.iter().all(|base| {
+        miller_rabin_round(
+            candidate,
+            &candidate_minus_one,
+            &d,
+            s,
+            &BigUint::from(*base),
+        )
+    })
+}
+
+fn miller_rabin_round(
+    candidate: &BigUint,
+    candidate_minus_one: &BigUint,
+    d: &BigUint,
+    s: usize,
+    base: &BigUint,
+) -> bool {
+    let zero = BigUint::zero();
+    let one = BigUint::one();
+    let witness = base % candidate;
+    if witness == zero || witness == one {
+        return true;
+    }
+
+    let mut x = witness.modpow(d, candidate);
+    if x == one || x == *candidate_minus_one {
+        return true;
+    }
+
+    for _ in 1..s {
+        x = (&x * &x) % candidate;
+        if x == *candidate_minus_one {
+            return true;
+        }
+        if x == one {
+            return false;
+        }
+    }
+
+    false
 }
 
 fn extract_totp_secret(input: &str) -> String {
@@ -406,14 +522,33 @@ fn decode_base32_secret(input: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn rejects_wrong_sized_signed_modulus_payload() {
-        let error = decode_modulus(
-            "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nAQID\n-----BEGIN PGP SIGNATURE-----\nignored\n-----END PGP SIGNATURE-----",
-        )
-        .unwrap_err();
+    const TEST_SERVER_EPHEMERAL: &str = "l13IQSVFBEV0ZZREuRQ4ZgP6OpGiIfIjbSDYQG3Yp39FkT2B/k3n1ZhwqrAdy+qvPPFq/le0b7UDtayoX4aOTJihoRvifas8Hr3icd9nAHqd0TUBbkZkT6Iy6UpzmirCXQtEhvGQIdOLuwvy+vZWh24G2ahBM75dAqwkP961EJMh67/I5PA5hJdQZjdPT5luCyVa7BS1d9ZdmuR0/VCjUOdJbYjgtIH7BQoZs+KacjhUN8gybu+fsycvTK3eC+9mCN2Y6GdsuCMuR3pFB0RF9eKae7cA6RbJfF1bjm0nNfWLXzgKguKBOeF3GEAsnCgK68q82/pq9etiUDizUlUBcA==";
+    const TEST_SIGNED_MODULUS: &str = "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nW2z5HBi8RvsfYzZTS7qBaUxxPhsfHJFZpu3Kd6s1JafNrCCH9rfvPLrfuqocxWPgWDH2R8neK7PkNvjxto9TStuY5z7jAzWRvFWN9cQhAKkdWgy0JY6ywVn22+HFpF4cYesHrqFIKUPDMSSIlWjBVmEJZ/MusD44ZT29xcPrOqeZvwtCffKtGAIjLYPZIEbZKnDM1Dm3q2K/xS5h+xdhjnndhsrkwm9U9oyA2wxzSXFL+pdfj2fOdRwuR5nW0J2NFrq3kJjkRmpO/Genq1UW+TEknIWAb6VzJJJA244K/H8cnSx2+nSNZO3bbo6Ys228ruV9A8m6DhxmS+bihN3ttQ==\n-----BEGIN PGP SIGNATURE-----\nVersion: ProtonMail\nComment: https://protonmail.com\n\nwl4EARYIABAFAlwB1j0JEDUFhcTpUY8mAAD8CgEAnsFnF4cF0uSHKkXa1GIa\nGO86yMV4zDZEZcDSJo0fgr8A/AlupGN9EdHlsrZLmTA1vhIx+rOgxdEff28N\nkvNM7qIK\n=q6vu\n-----END PGP SIGNATURE-----";
+    const TEST_MODULUS: &str = "W2z5HBi8RvsfYzZTS7qBaUxxPhsfHJFZpu3Kd6s1JafNrCCH9rfvPLrfuqocxWPgWDH2R8neK7PkNvjxto9TStuY5z7jAzWRvFWN9cQhAKkdWgy0JY6ywVn22+HFpF4cYesHrqFIKUPDMSSIlWjBVmEJZ/MusD44ZT29xcPrOqeZvwtCffKtGAIjLYPZIEbZKnDM1Dm3q2K/xS5h+xdhjnndhsrkwm9U9oyA2wxzSXFL+pdfj2fOdRwuR5nW0J2NFrq3kJjkRmpO/Genq1UW+TEknIWAb6VzJJJA244K/H8cnSx2+nSNZO3bbo6Ys228ruV9A8m6DhxmS+bihN3ttQ==";
 
-        assert_eq!(error.to_string(), "SRP modulus has incorrect size");
+    #[test]
+    fn accepts_valid_proton_signed_modulus_fixture() {
+        assert_eq!(
+            decode_modulus(TEST_SIGNED_MODULUS).unwrap(),
+            general_purpose::STANDARD.decode(TEST_MODULUS).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_proton_signed_modulus_signature() {
+        let invalid =
+            TEST_SIGNED_MODULUS.replacen("GO86yMV4zDZEZcDSJo0fgr8A", "HO86yMV4zDZEZcDSJo0fgr8A", 1);
+        let error = decode_modulus(&invalid).unwrap_err();
+
+        assert!(error.to_string().contains("invalid SRP modulus signature"));
+    }
+
+    #[test]
+    fn rejects_data_after_signed_modulus() {
+        let error =
+            decode_modulus(&format!("{TEST_SIGNED_MODULUS}data after modulus")).unwrap_err();
+
+        assert!(error.to_string().contains("invalid SRP signed modulus"));
     }
 
     #[test]
@@ -430,18 +565,15 @@ mod tests {
 
     #[test]
     fn calculates_base64_srp_fields_for_modern_proton() {
-        let modulus = vec![0x7f_u8; SRP_LEN];
-        let server_ephemeral = vec![0x05_u8; SRP_LEN];
-        let salt = b"1234567890";
         let client_secret = [0x11_u8; 32];
 
         let proof = calculate_srp_proof_with_secret(
             4,
-            "alice@example.com",
-            "correct horse battery staple",
-            &general_purpose::STANDARD.encode(salt),
-            &general_purpose::STANDARD.encode(&modulus),
-            &general_purpose::STANDARD.encode(&server_ephemeral),
+            "jakubqa",
+            "abc123",
+            "yKlc5/CvObfoiw==",
+            TEST_SIGNED_MODULUS,
+            TEST_SERVER_EPHEMERAL,
             Some(&client_secret),
         )
         .unwrap();

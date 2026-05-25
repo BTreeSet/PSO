@@ -14,6 +14,31 @@ use crate::model::{LogicalServer, ProtonLogicalResponse};
 
 const PROTON_LOGICALS_PROTOCOLS: &str = "WireGuardUDP,WireGuardTCP,WireGuardTLS";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtonAccessToken {
+    pub access_token: String,
+    pub uid: Option<String>,
+}
+
+impl ProtonAccessToken {
+    pub fn new(access_token: impl Into<String>, uid: Option<String>) -> Self {
+        Self {
+            access_token: access_token.into(),
+            uid,
+        }
+    }
+
+    pub fn from_tokens(tokens: &AuthTokens, fallback_uid: Option<&str>) -> Self {
+        Self::new(
+            tokens.access_token.clone(),
+            tokens
+                .uid
+                .clone()
+                .or_else(|| fallback_uid.map(ToOwned::to_owned)),
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ProtonApiClient {
     base_url: String,
@@ -57,14 +82,12 @@ impl ProtonApiClient {
 
     pub async fn get_certificate(
         &self,
-        access_token: &str,
+        access: &ProtonAccessToken,
         request: &CertificateRequest,
     ) -> Result<CertificateResponse> {
         let url = self.api_url("vpn/v1/certificate");
         send_json_with_retry(|| {
-            self.client
-                .post(&url)
-                .bearer_auth(access_token)
+            self.with_access_token_auth(self.client.post(&url), access)
                 .json(request)
         })
         .await
@@ -73,16 +96,18 @@ impl ProtonApiClient {
 
     pub async fn get_logicals(
         &self,
-        access_token: &str,
+        access: &ProtonAccessToken,
         country: Option<&str>,
         netzone: Option<&str>,
     ) -> Result<Vec<LogicalServer>> {
         let url = self.api_url("vpn/v2/logicals");
         Ok(send_json_with_retry::<ProtonLogicalResponse, _>(|| {
-            let mut builder = self.client.get(&url).bearer_auth(access_token).query(&[
-                ("WithEntriesForProtocols", PROTON_LOGICALS_PROTOCOLS),
-                ("WithState", "true"),
-            ]);
+            let mut builder = self
+                .with_access_token_auth(self.client.get(&url), access)
+                .query(&[
+                    ("WithEntriesForProtocols", PROTON_LOGICALS_PROTOCOLS),
+                    ("WithState", "true"),
+                ]);
             builder = builder.header("x-pm-response-truncation-permitted", "true");
             if let Some(country) = country {
                 builder = builder.header("x-pm-country", country);
@@ -187,7 +212,7 @@ impl ProtonApiClient {
 
     pub async fn fork_vpn_session(
         &self,
-        primary_access_token: &str,
+        primary_access: &ProtonAccessToken,
         payload: Option<String>,
     ) -> Result<AuthTokens> {
         let url = self.api_url("auth/v4/sessions/forks");
@@ -199,9 +224,7 @@ impl ProtonApiClient {
         };
 
         send_json_with_retry(|| {
-            self.client
-                .post(&url)
-                .bearer_auth(primary_access_token)
+            self.with_access_token_auth(self.client.post(&url), primary_access)
                 .json(&request)
         })
         .await
@@ -238,6 +261,18 @@ impl ProtonApiClient {
         access_token: &str,
     ) -> RequestBuilder {
         builder.header("x-pm-uid", uid).bearer_auth(access_token)
+    }
+
+    fn with_access_token_auth(
+        &self,
+        builder: RequestBuilder,
+        access: &ProtonAccessToken,
+    ) -> RequestBuilder {
+        let builder = match access.uid.as_deref() {
+            Some(uid) => builder.header("x-pm-uid", uid),
+            None => builder,
+        };
+        builder.bearer_auth(&access.access_token)
     }
 }
 

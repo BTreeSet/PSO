@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use pso::accounts::{ProtonAccount, ProtonAccountRegistry, require_single_account_access_token};
-use pso::api::ProtonApiClient;
+use pso::api::{ProtonAccessToken, ProtonApiClient};
 use pso::cli::{
     AuthCommand, Cli, Command, ControlPlaneArgs, FetchLogicalsArgs, HealthCommand, LoginArgs,
     ProbeArgs, ProviderListArgs, ProvidersArgs, ProvidersCommand, RefreshVpnTokenArgs, RenderArgs,
@@ -446,11 +446,14 @@ async fn resolve_manual_access_token(
     auth: &AuthConfig,
     access_token: Option<String>,
     account_name: Option<&str>,
-) -> Result<String> {
+) -> Result<ProtonAccessToken> {
     let registry = ProtonAccountRegistry::from_auth(auth)?;
     if let Some(access_token) = access_token {
         require_single_account_access_token(&registry, account_name)?;
-        return Ok(access_token);
+        return Ok(ProtonAccessToken::new(
+            access_token,
+            load_selected_account_uid(context, &registry, account_name),
+        ));
     }
 
     if registry.is_empty() {
@@ -462,6 +465,19 @@ async fn resolve_manual_access_token(
     let account = registry.resolve_selector(account_name, None)?;
     let mut cache = CachedAccessToken::default();
     pso::ensure_account_access_token(context, account, &mut cache).await
+}
+
+fn load_selected_account_uid(
+    context: &RuntimeContext,
+    registry: &ProtonAccountRegistry,
+    account_name: Option<&str>,
+) -> Option<String> {
+    let account = registry.resolve_selector(account_name, None).ok()?;
+    StateStore::open(context)
+        .ok()?
+        .load_proton_session(&account.username)
+        .ok()
+        .map(|state| state.uid)
 }
 
 fn write_json_output(path: &Path, value: &impl serde::Serialize) -> Result<()> {
