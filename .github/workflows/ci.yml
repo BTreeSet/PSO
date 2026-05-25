@@ -48,7 +48,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - name: Build and push container image
+        id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -57,6 +59,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Verify published container platforms
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          inspect_output="$(docker buildx imagetools inspect "${IMAGE_NAME}@${IMAGE_DIGEST}")"
+          printf '%s\n' "$inspect_output"
+          grep -q 'Platform:.*linux/amd64' <<<"$inspect_output"
+          grep -q 'Platform:.*linux/arm64' <<<"$inspect_output"
 
   release-binary:
     needs: rust

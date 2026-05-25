@@ -1,15 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM rust:1.95-alpine AS builder
+FROM --platform=$TARGETPLATFORM rust:1.95-alpine AS builder
 WORKDIR /src
 RUN apk add --no-cache musl-dev
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
-FROM ghcr.io/sagernet/sing-box:latest AS singbox
+FROM --platform=$TARGETPLATFORM ghcr.io/sagernet/sing-box:latest AS singbox
 
-FROM alpine:latest AS runtime
+FROM --platform=$TARGETPLATFORM alpine:latest AS runtime
 LABEL org.opencontainers.image.title="Proton-Singbox Orchestrator"
 LABEL org.opencontainers.image.description="PSO control plane with bundled sing-box runtime"
 RUN set -ex \
