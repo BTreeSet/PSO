@@ -92,6 +92,8 @@ Credential input options:
 
 PSO sends Proton requests with a configurable client profile under `auth.proton`. By default it uses an Android-shaped `x-pm-appversion` header and a `ProtonVPN/...` User-Agent derived from the configured profile. Set `auth.proton.client_id`, `auth.proton.app_version`, `auth.proton.device_name`, or `auth.proton.user_agent` when you need to pin PSO to a specific upstream Proton client profile. `auth.proton.device_name` is also used for `/vpn/v1/certificate` registration; when it is omitted, PSO falls back to the host `HOSTNAME` and then `pso-control-plane`.
 
+Set `api_base_url` to Proton's `/api` root, for example `https://account.protonvpn.com/api`. Current Proton login spans `auth/v4` and `core/v4` routes instead of a single `/api/core/v4` root. PSO still normalizes older `/api/core/v4` config values for backward compatibility.
+
 On success, PSO writes Proton auth-session state into `PSO_STATE_DIR/pso.sqlite3` and prints the current token response unless `--output` is supplied.
 
 When Proton requires human verification, PSO prints the challenge details returned by the API. Complete the challenge in a browser, then rerun the command with `--human-verification-token`.

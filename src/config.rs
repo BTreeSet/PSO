@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::provider::ProvidersConfig;
 
-pub const DEFAULT_API_BASE_URL: &str = "https://account.protonvpn.com/api/core/v4";
+pub const DEFAULT_API_BASE_URL: &str = "https://account.protonvpn.com/api";
 pub const DEFAULT_STATE_DIR: &str = "pso-state";
 pub const DEFAULT_PROTON_CLIENT_ID: &str = "android-vpn";
 pub const DEFAULT_PROTON_APP_VERSION: &str = "5.18.46.0";

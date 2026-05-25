@@ -1,5 +1,5 @@
 {
-  "api_base_url": "https://account.protonvpn.com/api/core/v4",
+  "api_base_url": "https://account.protonvpn.com/api",
   "state_dir": "/var/lib/pso",
   "providers": {
     "wireguard": [

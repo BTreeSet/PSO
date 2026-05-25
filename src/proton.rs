@@ -41,43 +41,57 @@ pub async fn login_with_prompts(
     human_verification_token: Option<&str>,
 ) -> Result<AuthTokens> {
     let api = ProtonApiClient::from_context(context)?;
-    let info = api.auth_info(username, human_verification_token).await?;
-    if info.version != 4 {
+    let bootstrap = api.create_unauth_session().await?;
+    let info = api
+        .auth_info(&bootstrap, username, human_verification_token)
+        .await?;
+    if !matches!(info.version, 3 | 4) {
         bail!("unsupported Proton SRP auth version {}", info.version);
     }
 
-    let two_factor_input = if info.two_factor.unwrap_or(0) > 0 && totp_input.is_none() && !no_prompt
-    {
-        Some(rpassword::prompt_password("Proton TOTP: ")?)
-    } else if info.two_factor.unwrap_or(0) > 0 && totp_input.is_none() {
-        bail!(
-            "TOTP is required for this account; pass --totp, configure account.totp, or disable no_prompt"
-        )
-    } else {
-        totp_input
-    };
-    let totp = two_factor_input
-        .as_deref()
-        .map(resolve_two_factor_code)
-        .transpose()?;
-
     let proof = calculate_srp_proof(
+        info.version,
         username,
         &password,
         &info.salt,
         &info.modulus,
         &info.server_ephemeral,
     )?;
-    let primary = api
+    let auth_response = api
         .authenticate(
+            &bootstrap,
             username,
             &proof,
-            &info.modulus,
-            totp.as_deref(),
+            None,
             human_verification_token,
+            &info.srp_session,
         )
         .await?;
-    Ok(primary)
+    verify_server_proof(
+        auth_response.server_proof.as_deref(),
+        &proof.expected_server_proof,
+    )?;
+
+    if auth_response.requires_two_factor() {
+        if !auth_response.supports_totp() {
+            bail!(
+                "Proton account requires a second factor that PSO cannot complete automatically; configure a TOTP-capable account or complete login outside PSO"
+            );
+        }
+
+        let totp_input = match totp_input {
+            Some(value) => value,
+            None if !no_prompt => rpassword::prompt_password("Proton TOTP: ")?,
+            None => bail!(
+                "TOTP is required for this account; pass --totp, configure account.totp, or disable no_prompt"
+            ),
+        };
+        let totp = resolve_two_factor_code(&totp_input)?;
+        api.authenticate_two_factor(&auth_response.tokens, &totp)
+            .await?;
+    }
+
+    Ok(auth_response.tokens)
 }
 
 pub async fn login_configured_account(
@@ -190,4 +204,12 @@ fn current_time_ms() -> i64 {
 
 pub fn proton_wireguard_assigned_ips() -> Vec<String> {
     vec![PROTON_WIREGUARD_ADDRESS_V4.to_string()]
+}
+
+fn verify_server_proof(server_proof: Option<&str>, expected_server_proof: &str) -> Result<()> {
+    let server_proof = server_proof.context("Proton auth response did not include ServerProof")?;
+    if server_proof != expected_server_proof {
+        bail!("Proton auth response returned an unexpected server proof");
+    }
+    Ok(())
 }
