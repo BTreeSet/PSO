@@ -1,91 +1,230 @@
 name: CI
 
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ["v*"]
-  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  rust:
-    runs-on: ubuntu-latest
+  quality:
+    name: Rust quality gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked
 
-  container:
-    needs: rust
-    runs-on: ubuntu-latest
+  container-metadata:
+    name: Prepare container metadata
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      image_name: ${{ steps.image.outputs.name }}
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v4
       - name: Compute image name
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-      - uses: docker/metadata-action@v6
+      - name: Compute container tags
         id: meta
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
-            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
+
+  container-build:
+    name: Container ${{ matrix.arch }}
+    needs:
+      - quality
+      - container-metadata
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         if: github.event_name != 'pull_request'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push container image
+      - name: Build container image
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          labels: ${{ needs.container-metadata.outputs.labels }}
+          cache-from: type=gha,scope=container-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=container-${{ matrix.arch }}
+      - name: Build and push container image by digest
+        if: github.event_name != 'pull_request'
         id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Verify published container platforms
+          platforms: ${{ matrix.platform }}
+          labels: ${{ needs.container-metadata.outputs.labels }}
+          cache-from: type=gha,scope=container-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=container-${{ matrix.arch }}
+          outputs: type=image,name=${{ needs.container-metadata.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
+      - name: Record image digest
         if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
         env:
-          IMAGE_NAME: ${{ steps.image.outputs.name }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+      - name: Upload image digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  container-merge:
+    name: Publish multi-arch container
+    needs:
+      - container-metadata
+      - container-build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and push manifest list
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE_NAME: ${{ needs.container-metadata.outputs.image_name }}
+          TAGS: ${{ needs.container-metadata.outputs.tags }}
         run: |
           set -euo pipefail
-          inspect_output="$(docker buildx imagetools inspect "${IMAGE_NAME}@${IMAGE_DIGEST}")"
+          shopt -s nullglob
+          digests=(*)
+          if [[ "${#digests[@]}" -eq 0 ]]; then
+            echo "No image digests were uploaded."
+            exit 1
+          fi
+          mapfile -t tags <<<"$TAGS"
+          if [[ "${#tags[@]}" -eq 0 ]]; then
+            echo "No container tags were generated."
+            exit 1
+          fi
+          refs=()
+          for digest in "${digests[@]}"; do
+            refs+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
+      - name: Verify published manifest
+        env:
+          TAGS: ${{ needs.container-metadata.outputs.tags }}
+        run: |
+          set -euo pipefail
+          mapfile -t tags <<<"$TAGS"
+          inspect_output="$(docker buildx imagetools inspect "${tags[0]}")"
           printf '%s\n' "$inspect_output"
           grep -q 'Platform:.*linux/amd64' <<<"$inspect_output"
           grep -q 'Platform:.*linux/arm64' <<<"$inspect_output"
 
-  release-binary:
-    needs: rust
+  release-binaries:
+    name: Release binary ${{ matrix.name }}
+    needs: quality
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            binary_name: pso-linux-amd64
+            archive_name: pso-linux-amd64.tar.gz
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            binary_name: pso-linux-arm64
+            archive_name: pso-linux-arm64.tar.gz
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
-      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
-      - run: |
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package release archive
+        run: |
           mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/pso dist/pso-linux-amd64
-          tar -C dist -czf dist/pso-linux-amd64.tar.gz pso-linux-amd64
+          cp "target/${{ matrix.target }}/release/pso" "dist/${{ matrix.binary_name }}"
+          tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.binary_name }}"
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/pso-linux-amd64.tar.gz
+          files: dist/${{ matrix.archive_name }}

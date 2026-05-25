@@ -223,7 +223,7 @@ Docker is not required for local Rust development.
 
 ## Releases
 
-End users should use compiled release artifacts or container images, not Cargo. Tagged releases publish a Linux amd64 binary archive through GitHub Releases, and the CI/CD pipeline publishes multi-arch container images to GHCR.
+End users should use compiled release artifacts or container images, not Cargo. Tagged releases publish Linux amd64 and arm64 binary archives through GitHub Releases, and the CI/CD pipeline publishes multi-arch container images to GHCR.
 
 Local Cargo commands in this README are development examples. For release binaries, replace `cargo run --` with `pso`.
 
