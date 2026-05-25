@@ -155,7 +155,7 @@ fn strip_ascii_whitespace(value: &str) -> String {
 
 fn is_hex_string(value: &str) -> bool {
     !value.is_empty()
-    && value.len().is_multiple_of(2)
+        && value.len().is_multiple_of(2)
         && value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
 }
 
