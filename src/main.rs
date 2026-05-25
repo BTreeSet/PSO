@@ -7,9 +7,9 @@ use clap::Parser;
 use pso::accounts::{ProtonAccount, ProtonAccountRegistry, require_single_account_access_token};
 use pso::api::{ProtonAccessToken, ProtonApiClient};
 use pso::cli::{
-    AuthCommand, Cli, Command, ControlPlaneArgs, FetchLogicalsArgs, HealthCommand, LoginArgs,
-    ProbeArgs, ProviderListArgs, ProvidersArgs, ProvidersCommand, RefreshVpnTokenArgs, RenderArgs,
-    RunArgs, TopologyCommand,
+    AuthCommand, Cli, Command, ControlPlaneArgs, DebugAuthCommand, DebugCommand, FetchLogicalsArgs,
+    HealthCommand, LoginArgs, ProbeArgs, ProviderListArgs, ProvidersArgs, ProvidersCommand,
+    RefreshVpnTokenArgs, RenderArgs, RunArgs, TopologyCommand,
 };
 use pso::config::{
     AppConfig, AuthConfig, ControlPlaneDefaults, DEFAULT_API_BASE_URL, DEFAULT_STATE_DIR,
@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
             control_plane(&context, &config.auth, &config.control_plane, args).await
         }
         Command::Auth(args) => match args.command {
-            AuthCommand::Login(args) => login(&context, &config.auth, args).await,
+            AuthCommand::Login(args) => login(&context, &config.auth, args, false).await,
             AuthCommand::Refresh(args) => refresh_vpn_token(&context, &config.auth, args).await,
         },
         Command::Topology(args) => match args.command {
@@ -74,6 +74,11 @@ async fn main() -> Result<()> {
         },
         Command::Providers(args) => providers(args),
         Command::State(args) => state_cli::run_state(&context, args),
+        Command::Debug(args) => match args.command {
+            DebugCommand::Auth(args) => match args.command {
+                DebugAuthCommand::Login(args) => login(&context, &config.auth, args, true).await,
+            },
+        },
     }
 }
 
@@ -305,7 +310,12 @@ fn write_logicals_from_available_state(
         .with_context(|| format!("failed to write {}", output.display()))
 }
 
-async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -> Result<()> {
+async fn login(
+    context: &RuntimeContext,
+    config: &AuthConfig,
+    args: LoginArgs,
+    debug_http: bool,
+) -> Result<()> {
     let registry = ProtonAccountRegistry::from_auth(config)?;
     let session = if let Some(account_name) = args.account.as_deref() {
         let account = registry.get_required(account_name)?;
@@ -316,6 +326,7 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
             args.password,
             args.totp,
             args.human_verification_token.as_deref(),
+            debug_http,
         )
         .await?;
         persist_proton_session(context, &account.username, None, &session)?;
@@ -328,6 +339,7 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
                 args.password,
                 args.totp,
                 args.human_verification_token.as_deref(),
+                debug_http,
             )
             .await?;
             persist_proton_session(context, &account.username, None, &session)?;
@@ -341,6 +353,7 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
                 args.totp,
                 args.no_prompt,
                 args.human_verification_token.as_deref(),
+                debug_http,
             )
             .await?;
             persist_proton_session(context, &username, None, &session)?;
@@ -357,6 +370,7 @@ async fn login(context: &RuntimeContext, config: &AuthConfig, args: LoginArgs) -
             args.password,
             args.totp,
             args.human_verification_token.as_deref(),
+            debug_http,
         )
         .await?;
         persist_proton_session(context, &account.username, None, &session)?;

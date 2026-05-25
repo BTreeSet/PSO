@@ -46,14 +46,30 @@ pub async fn login_with_prompts(
     totp_input: Option<String>,
     no_prompt: bool,
     human_verification_token: Option<&str>,
+    debug_http: bool,
 ) -> Result<AuthTokens> {
-    let api = ProtonApiClient::from_context(context)?;
+    let api = if debug_http {
+        ProtonApiClient::from_context_with_debug(context, true)?
+    } else {
+        ProtonApiClient::from_context(context)?
+    };
     let bootstrap = api.create_unauth_session().await?;
     let info = api
         .auth_info(&bootstrap, username, human_verification_token)
         .await?;
     if !matches!(info.version, 3 | 4) {
         bail!("unsupported Proton SRP auth version {}", info.version);
+    }
+
+    if debug_http {
+        eprintln!(
+            "[pso-debug] auth/info: version={} modulus_chars={} salt_chars={} server_ephemeral_chars={} srp_session_chars={}",
+            info.version,
+            info.modulus.len(),
+            info.salt.len(),
+            info.server_ephemeral.len(),
+            info.srp_session.len(),
+        );
     }
 
     let proof = calculate_srp_proof(
@@ -107,6 +123,7 @@ pub async fn login_configured_account(
     password_override: Option<String>,
     totp_override: Option<String>,
     human_verification_token: Option<&str>,
+    debug_http: bool,
 ) -> Result<AuthTokens> {
     let password = match password_override {
         Some(password) => password,
@@ -130,6 +147,7 @@ pub async fn login_configured_account(
         totp_override.or_else(|| account.totp.clone()),
         account.no_prompt,
         human_verification_token,
+        debug_http,
     )
     .await
 }
@@ -177,7 +195,7 @@ pub async fn ensure_account_access_token(
                 if account.no_prompt {
                     account.ensure_can_login_headless()?;
                 }
-                let tokens = login_configured_account(context, account, None, None, None)
+                let tokens = login_configured_account(context, account, None, None, None, false)
                     .await
                     .with_context(|| {
                         format!(
@@ -194,7 +212,8 @@ pub async fn ensure_account_access_token(
             if account.no_prompt {
                 account.ensure_can_login_headless()?;
             }
-            let tokens = login_configured_account(context, account, None, None, None).await?;
+            let tokens =
+                login_configured_account(context, account, None, None, None, false).await?;
             persist_proton_session(context, &account.username, None, &tokens)?;
             cache.store(&tokens, None);
             Ok(ProtonAccessToken::from_tokens(&tokens, None))

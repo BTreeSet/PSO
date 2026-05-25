@@ -44,6 +44,7 @@ pub struct ProtonApiClient {
     base_url: String,
     client: Client,
     client_id: String,
+    debug_http: bool,
 }
 
 impl ProtonApiClient {
@@ -55,9 +56,21 @@ impl ProtonApiClient {
         Self::with_profile(&context.api_base_url, &context.proton_client)
     }
 
+    pub fn from_context_with_debug(context: &RuntimeContext, debug_http: bool) -> Result<Self> {
+        Self::with_profile_and_debug(&context.api_base_url, &context.proton_client, debug_http)
+    }
+
     pub fn with_profile(
         base_url: impl Into<String>,
         profile: &ProtonClientProfile,
+    ) -> Result<Self> {
+        Self::with_profile_and_debug(base_url, profile, false)
+    }
+
+    pub fn with_profile_and_debug(
+        base_url: impl Into<String>,
+        profile: &ProtonClientProfile,
+        debug_http: bool,
     ) -> Result<Self> {
         let mut default_headers = HeaderMap::new();
         default_headers.insert(
@@ -77,6 +90,7 @@ impl ProtonApiClient {
             base_url: normalize_api_base_url(base_url.into()),
             client,
             client_id: profile.client_id.clone(),
+            debug_http,
         })
     }
 
@@ -86,10 +100,13 @@ impl ProtonApiClient {
         request: &CertificateRequest,
     ) -> Result<CertificateResponse> {
         let url = self.api_url("vpn/v1/certificate");
-        send_json_with_retry(|| {
-            self.with_access_token_auth(self.client.post(&url), access)
-                .json(request)
-        })
+        send_json_with_retry(
+            || {
+                self.with_access_token_auth(self.client.post(&url), access)
+                    .json(request)
+            },
+            self.debug_http,
+        )
         .await
         .context("Proton certificate request failed")
     }
@@ -101,22 +118,25 @@ impl ProtonApiClient {
         netzone: Option<&str>,
     ) -> Result<Vec<LogicalServer>> {
         let url = self.api_url("vpn/v2/logicals");
-        Ok(send_json_with_retry::<ProtonLogicalResponse, _>(|| {
-            let mut builder = self
-                .with_access_token_auth(self.client.get(&url), access)
-                .query(&[
-                    ("WithEntriesForProtocols", PROTON_LOGICALS_PROTOCOLS),
-                    ("WithState", "true"),
-                ]);
-            builder = builder.header("x-pm-response-truncation-permitted", "true");
-            if let Some(country) = country {
-                builder = builder.header("x-pm-country", country);
-            }
-            if let Some(netzone) = netzone {
-                builder = builder.header("x-pm-netzone", netzone);
-            }
-            builder
-        })
+        Ok(send_json_with_retry::<ProtonLogicalResponse, _>(
+            || {
+                let mut builder = self
+                    .with_access_token_auth(self.client.get(&url), access)
+                    .query(&[
+                        ("WithEntriesForProtocols", PROTON_LOGICALS_PROTOCOLS),
+                        ("WithState", "true"),
+                    ]);
+                builder = builder.header("x-pm-response-truncation-permitted", "true");
+                if let Some(country) = country {
+                    builder = builder.header("x-pm-country", country);
+                }
+                if let Some(netzone) = netzone {
+                    builder = builder.header("x-pm-netzone", netzone);
+                }
+                builder
+            },
+            self.debug_http,
+        )
         .await
         .context("Proton logicals request failed")?
         .into_servers())
@@ -124,11 +144,14 @@ impl ProtonApiClient {
 
     pub async fn create_unauth_session(&self) -> Result<PreAuthSession> {
         let url = self.api_url("auth/v4/sessions");
-        send_json_with_retry(|| {
-            self.client
-                .post(&url)
-                .header("x-enforce-unauthsession", "true")
-        })
+        send_json_with_retry(
+            || {
+                self.client
+                    .post(&url)
+                    .header("x-enforce-unauthsession", "true")
+            },
+            self.debug_http,
+        )
         .await
         .context("Proton unauthenticated session request failed")
     }
@@ -144,15 +167,18 @@ impl ProtonApiClient {
             username: Some(username.to_string()),
             intent: "Proton".into(),
         };
-        send_json_with_retry(|| {
-            let mut builder = self
-                .with_auth_headers(self.client.post(&url), &session.uid, &session.access_token)
-                .json(&request);
-            if let Some(token) = human_verification_token {
-                builder = builder.header("X-PM-Human-Verification", token);
-            }
-            builder
-        })
+        send_json_with_retry(
+            || {
+                let mut builder = self
+                    .with_auth_headers(self.client.post(&url), &session.uid, &session.access_token)
+                    .json(&request);
+                if let Some(token) = human_verification_token {
+                    builder = builder.header("X-PM-Human-Verification", token);
+                }
+                builder
+            },
+            self.debug_http,
+        )
         .await
         .context("Proton auth info request failed")
     }
@@ -175,15 +201,18 @@ impl ProtonApiClient {
             srp_session: srp_session.to_string(),
             two_factor_code: two_factor_code.map(ToOwned::to_owned),
         };
-        send_json_with_retry(|| {
-            let mut builder = self
-                .with_auth_headers(self.client.post(&url), &session.uid, &session.access_token)
-                .json(&request);
-            if let Some(token) = human_verification_token {
-                builder = builder.header("X-PM-Human-Verification", token);
-            }
-            builder
-        })
+        send_json_with_retry(
+            || {
+                let mut builder = self
+                    .with_auth_headers(self.client.post(&url), &session.uid, &session.access_token)
+                    .json(&request);
+                if let Some(token) = human_verification_token {
+                    builder = builder.header("X-PM-Human-Verification", token);
+                }
+                builder
+            },
+            self.debug_http,
+        )
         .await
         .context("Proton auth request failed")
     }
@@ -201,10 +230,13 @@ impl ProtonApiClient {
         let request = LoginTwoFactorBody {
             two_factor_code: two_factor_code.to_string(),
         };
-        let _response: ApiCodeResponse = send_json_with_retry(|| {
-            self.with_auth_headers(self.client.post(&url), uid, &tokens.access_token)
-                .json(&request)
-        })
+        let _response: ApiCodeResponse = send_json_with_retry(
+            || {
+                self.with_auth_headers(self.client.post(&url), uid, &tokens.access_token)
+                    .json(&request)
+            },
+            self.debug_http,
+        )
         .await
         .context("Proton two-factor auth request failed")?;
         Ok(())
@@ -223,10 +255,13 @@ impl ProtonApiClient {
             user_code: None,
         };
 
-        send_json_with_retry(|| {
-            self.with_access_token_auth(self.client.post(&url), primary_access)
-                .json(&request)
-        })
+        send_json_with_retry(
+            || {
+                self.with_access_token_auth(self.client.post(&url), primary_access)
+                    .json(&request)
+            },
+            self.debug_http,
+        )
         .await
         .context("Proton session fork request failed")
     }
@@ -240,12 +275,15 @@ impl ProtonApiClient {
             redirect_uri: "https://protonmail.com".into(),
         };
 
-        send_json_with_retry(|| {
-            self.client
-                .post(&url)
-                .header("x-pm-uid", uid)
-                .json(&request)
-        })
+        send_json_with_retry(
+            || {
+                self.client
+                    .post(&url)
+                    .header("x-pm-uid", uid)
+                    .json(&request)
+            },
+            self.debug_http,
+        )
         .await
         .context("Proton auth refresh request failed")
     }
@@ -291,7 +329,7 @@ fn normalize_api_base_url(base_url: impl Into<String>) -> String {
     value
 }
 
-async fn send_json_with_retry<T, F>(mut build: F) -> Result<T>
+async fn send_json_with_retry<T, F>(mut build: F, debug_http: bool) -> Result<T>
 where
     T: DeserializeOwned,
     F: FnMut() -> RequestBuilder,
@@ -300,12 +338,12 @@ where
     for attempt in 0..3 {
         match build().send().await {
             Ok(response) if has_human_verification(&response) => {
-                return decode_response(response).await;
+                return decode_response(response, debug_http).await;
             }
             Ok(response) if is_retryable(response.status()) && attempt < 2 => {
                 sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
             }
-            Ok(response) => return decode_response(response).await,
+            Ok(response) => return decode_response(response, debug_http).await,
             Err(error) if attempt < 2 => {
                 last_error = Some(error);
                 sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
@@ -331,7 +369,13 @@ fn has_human_verification(response: &Response) -> bool {
         && response.headers().contains_key("X-PM-Human-Verification")
 }
 
-async fn decode_response<T: serde::de::DeserializeOwned>(response: Response) -> Result<T> {
+async fn decode_response<T: serde::de::DeserializeOwned>(
+    response: Response,
+    debug_http: bool,
+) -> Result<T> {
+    let status = response.status();
+    let url = response.url().clone();
+
     if has_human_verification(&response) {
         let challenge = response
             .headers()
@@ -339,9 +383,30 @@ async fn decode_response<T: serde::de::DeserializeOwned>(response: Response) -> 
             .and_then(|value| value.to_str().ok())
             .unwrap_or("challenge")
             .to_string();
+        let headers = debug_response_headers(response.headers());
         let body = response.text().await.unwrap_or_default();
+        if debug_http {
+            bail!(
+                "human verification required: challenge={challenge}; url={}; status={}; headers={}; body={body}",
+                url,
+                status,
+                headers,
+            );
+        }
         bail!(
             "human verification required: solve the Proton challenge and retry with --human-verification-token ({challenge}). Response body: {body}"
+        );
+    }
+
+    if debug_http && !status.is_success() {
+        let headers = debug_response_headers(response.headers());
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "Proton API request failed: status={} url={} headers={} body={}",
+            status,
+            url,
+            headers,
+            body,
         );
     }
 
@@ -351,6 +416,29 @@ async fn decode_response<T: serde::de::DeserializeOwned>(response: Response) -> 
         .json::<T>()
         .await
         .context("failed to decode Proton API response")
+}
+
+fn debug_response_headers(headers: &HeaderMap) -> String {
+    let mut parts = Vec::new();
+    for key in [
+        "content-type",
+        "access",
+        "retry-after",
+        "x-request-id",
+        "x-pm-human-verification",
+    ] {
+        if let Some(value) = headers.get(key)
+            && let Ok(text) = value.to_str()
+        {
+            parts.push(format!("{key}: {text}"));
+        }
+    }
+
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]

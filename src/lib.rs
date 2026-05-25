@@ -33,7 +33,9 @@ pub use filter::{FeatureMask, ServerFilter, select_target};
 pub use health::{HealthMonitor, HealthStatus, ProbeResult};
 pub use model::{LogicalServer, PhysicalServer};
 pub use process::{find_process_pid, find_process_pid_by_exe, sighup_process};
-pub use proton::{CachedAccessToken, ensure_account_access_token, login_configured_account};
+pub use proton::{
+    CachedAccessToken, ensure_account_access_token, login_configured_account, login_with_prompts,
+};
 pub use provider::{
     KnownWireGuardProvider, ProvidersConfig, WireGuardEndpointResolution, WireGuardProviderConfig,
     WireGuardServerConfig, WireGuardServerFilter, known_wireguard_providers,

@@ -25,6 +25,29 @@ pub enum Command {
     Topology(TopologyArgs),
     Providers(ProvidersArgs),
     State(StateArgs),
+    Debug(DebugArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DebugArgs {
+    #[command(subcommand)]
+    pub command: DebugCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DebugCommand {
+    Auth(DebugAuthArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DebugAuthArgs {
+    #[command(subcommand)]
+    pub command: DebugAuthCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DebugAuthCommand {
+    Login(LoginArgs),
 }
 
 #[derive(Debug, Args)]
