@@ -102,7 +102,7 @@ impl ProtonApiClient {
         username: &str,
         human_verification_token: Option<&str>,
     ) -> Result<LoginInfoResponse> {
-        let url = format!("{}/auth/v4/info", self.base_url);
+        let url = format!("{}/auth/info", self.base_url);
         let request = LoginInfoBody {
             username: username.to_string(),
         };
@@ -125,7 +125,7 @@ impl ProtonApiClient {
         two_factor_code: Option<&str>,
         human_verification_token: Option<&str>,
     ) -> Result<AuthTokens> {
-        let url = format!("{}/auth/v4", self.base_url);
+        let url = format!("{}/auth", self.base_url);
         let request = LoginBody {
             username: username.to_string(),
             client_ephemeral: srp.client_ephemeral.clone(),
@@ -149,7 +149,7 @@ impl ProtonApiClient {
         primary_access_token: &str,
         payload: Option<String>,
     ) -> Result<AuthTokens> {
-        let url = format!("{}/auth/v4/sessions/forks", self.base_url);
+        let url = format!("{}/auth/sessions/forks", self.base_url);
         let request = SessionForkBody {
             payload: payload.unwrap_or_default(),
             child_client_id: self.client_id.clone(),
@@ -168,7 +168,7 @@ impl ProtonApiClient {
     }
 
     pub async fn refresh_session(&self, uid: &str, refresh_token: &str) -> Result<AuthTokens> {
-        let url = format!("{}/auth/v4/refresh", self.base_url);
+        let url = format!("{}/auth/refresh", self.base_url);
         let request = RefreshSessionBody {
             uid: uid.to_string(),
             refresh_token: refresh_token.to_string(),
