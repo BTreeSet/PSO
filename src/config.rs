@@ -8,8 +8,9 @@ use crate::provider::ProvidersConfig;
 
 pub const DEFAULT_API_BASE_URL: &str = "https://account.protonvpn.com/api";
 pub const DEFAULT_STATE_DIR: &str = "pso-state";
-pub const DEFAULT_PROTON_CLIENT_ID: &str = "android-vpn";
-pub const DEFAULT_PROTON_APP_VERSION: &str = "5.18.46.0";
+pub const DEFAULT_PROTON_CLIENT_ID: &str = "web-vpn-settings";
+pub const DEFAULT_PROTON_APP_VERSION: &str = "5.0.336.0";
+pub const DEFAULT_PROTON_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 const DEFAULT_PROTON_DEVICE_NAME: &str = "pso-control-plane";
 
 #[derive(Clone, Debug)]
@@ -44,7 +45,7 @@ impl ProtonClientProfile {
             .unwrap_or_else(default_proton_device_name);
         let user_agent = normalize_non_empty(config.user_agent.as_deref())
             .map(sanitize_header_value)
-            .unwrap_or_else(|| default_proton_user_agent(&app_version, &device_name));
+            .unwrap_or_else(|| DEFAULT_PROTON_USER_AGENT.to_string());
 
         Self {
             app_version_header: sanitize_header_value(format!("{client_id}@{app_version}")),
@@ -197,10 +198,6 @@ fn default_proton_device_name() -> String {
         .unwrap_or_else(|| DEFAULT_PROTON_DEVICE_NAME.to_string())
 }
 
-fn default_proton_user_agent(app_version: &str, device_name: &str) -> String {
-    sanitize_header_value(format!("ProtonVPN/{app_version} (Linux; {device_name})"))
-}
-
 fn normalize_non_empty(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     (!value.is_empty()).then(|| value.to_string())
@@ -233,7 +230,7 @@ mod tests {
             profile.app_version_header,
             format!("{DEFAULT_PROTON_CLIENT_ID}@{DEFAULT_PROTON_APP_VERSION}")
         );
-        assert!(profile.user_agent.starts_with("ProtonVPN/5.18.46.0"));
+        assert_eq!(profile.user_agent, DEFAULT_PROTON_USER_AGENT);
     }
 
     #[test]

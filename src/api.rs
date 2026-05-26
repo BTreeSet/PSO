@@ -1194,12 +1194,12 @@ mod tests {
 
         let fork = serde_json::to_value(SessionForkBody {
             payload: "payload".into(),
-            child_client_id: "android-vpn".into(),
+            child_client_id: "web-vpn-settings".into(),
             independent: 1,
             user_code: Some("code".into()),
         })
         .unwrap();
-        assert_eq!(fork["ChildClientID"], "android-vpn");
+        assert_eq!(fork["ChildClientID"], "web-vpn-settings");
         assert_eq!(fork["Payload"], "payload");
         assert_eq!(fork["Independent"], 1);
         assert_eq!(fork["UserCode"], "code");
