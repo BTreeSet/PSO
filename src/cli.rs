@@ -223,7 +223,12 @@ pub struct LoginArgs {
         help = "Six-digit 2FA code, base32 TOTP secret, or otpauth:// URI"
     )]
     pub totp: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        visible_alias = "captcha-token",
+        env = "PSO_PROTON_HUMAN_VERIFICATION_TOKEN",
+        help = "Resolved verification token returned after completing Proton CAPTCHA"
+    )]
     pub human_verification_token: Option<String>,
     #[arg(long)]
     pub output: Option<PathBuf>,

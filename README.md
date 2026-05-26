@@ -102,7 +102,7 @@ Set `api_base_url` to Proton's `/api` root, for example `https://account.protonv
 
 On success, PSO writes Proton auth-session state into `PSO_STATE_DIR/pso.sqlite3` and prints the current token response unless `--output` is supplied.
 
-When Proton requires human verification, PSO prints the challenge details returned by the API. Complete the challenge in a browser, then rerun the command with `--human-verification-token`.
+When Proton requires human verification, PSO prints the challenge details returned by the API and, in interactive login sessions, prompts for the resolved verification token after you complete the browser challenge. The `verify.proton.me` URL in the error is the challenge handle; PSO still needs the resolved verification token that Proton returns after the CAPTCHA is completed. The `--human-verification-token` flag accepts that resolved token for both `auth login` and `debug auth login`, and it also reads from `PSO_PROTON_HUMAN_VERIFICATION_TOKEN` for headless runs.
 
 Refresh an existing stored Proton session without replaying the password flow:
 

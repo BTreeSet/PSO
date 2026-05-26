@@ -28,6 +28,7 @@ const BROWSER_SEC_FETCH_SITE: &str = "same-origin";
 const BROWSER_SEC_GPC: &str = "1";
 const BROWSER_LOGIN_REFERER: &str = "https://account.protonvpn.com/login";
 const BROWSER_DOWNLOADS_REFERER: &str = "https://account.protonvpn.com/downloads";
+const HUMAN_VERIFICATION_CAPTCHA_TYPE: &str = "captcha";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtonAccessToken {
@@ -278,7 +279,7 @@ impl ProtonApiClient {
                 )
                 .json(&request);
                 if let Some(token) = human_verification_token {
-                    builder = builder.header("X-PM-Human-Verification", token);
+                    builder = builder.headers(human_verification_request_headers(token));
                 }
                 builder
             },
@@ -318,7 +319,7 @@ impl ProtonApiClient {
                 )
                 .json(&request);
                 if let Some(token) = human_verification_token {
-                    builder = builder.header("X-PM-Human-Verification", token);
+                    builder = builder.headers(human_verification_request_headers(token));
                 }
                 builder
             },
@@ -476,6 +477,19 @@ fn browser_default_headers() -> HeaderMap {
     headers
 }
 
+fn human_verification_request_headers(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-pm-human-verification-token",
+        HeaderValue::from_str(token).expect("invalid Proton human verification token"),
+    );
+    headers.insert(
+        "x-pm-human-verification-token-type",
+        HeaderValue::from_static(HUMAN_VERIFICATION_CAPTCHA_TYPE),
+    );
+    headers
+}
+
 fn with_browser_referer_headers(builder: RequestBuilder, referer: &'static str) -> RequestBuilder {
     builder.header("referer", referer)
 }
@@ -542,16 +556,15 @@ async fn decode_response<T: serde::de::DeserializeOwned>(
             .to_string();
         let headers = debug_response_headers(response.headers());
         let body = response.text().await.unwrap_or_default();
-        if debug_http {
-            bail!(
-                "human verification required: challenge={challenge}; url={}; status={}; headers={}; body={body}",
-                url,
-                status,
-                headers,
-            );
-        }
-        bail!(
-            "human verification required: solve the Proton challenge and retry with --human-verification-token ({challenge}). Response body: {body}"
+        let debug_details = if debug_http {
+            Some(format!(
+                "status={status}; url={url}; headers={headers}; body={body}"
+            ))
+        } else {
+            None
+        };
+        return Err(
+            HumanVerificationChallenge::from_response(&body, &challenge, debug_details).into(),
         );
     }
 
@@ -710,6 +723,122 @@ pub struct ApiCodeResponse {
     #[serde(alias = "Code", default)]
     pub code: Option<u64>,
 }
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct HumanVerificationResponseBody {
+    #[serde(alias = "Details", default)]
+    details: Option<HumanVerificationDetails>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct HumanVerificationDetails {
+    #[serde(
+        alias = "HumanVerificationToken",
+        alias = "Token",
+        alias = "token",
+        default
+    )]
+    token: Option<String>,
+    #[serde(
+        default,
+        alias = "HumanVerificationMethods",
+        alias = "Methods",
+        alias = "methods"
+    )]
+    methods: Vec<String>,
+    #[serde(default, alias = "WebUrl", alias = "webUrl", alias = "web_url")]
+    web_url: Option<String>,
+    #[serde(default, alias = "Title", alias = "title")]
+    title: Option<String>,
+    #[serde(default, alias = "Description", alias = "description")]
+    description: Option<String>,
+    #[serde(
+        default,
+        alias = "ExpiresAt",
+        alias = "expiresAt",
+        alias = "expires_at"
+    )]
+    expires_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HumanVerificationChallenge {
+    pub challenge_token: String,
+    pub methods: Vec<String>,
+    pub web_url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub expires_at: Option<u64>,
+    pub debug_details: Option<String>,
+}
+
+impl HumanVerificationChallenge {
+    fn from_response(body: &str, challenge_token: &str, debug_details: Option<String>) -> Self {
+        let parsed = serde_json::from_str::<HumanVerificationResponseBody>(body).ok();
+        let details = parsed
+            .as_ref()
+            .and_then(|response| response.details.as_ref());
+        let challenge_token = details
+            .and_then(|details| details.token.clone())
+            .unwrap_or_else(|| challenge_token.to_string());
+        let methods = details
+            .map(|details| details.methods.clone())
+            .filter(|methods| !methods.is_empty())
+            .unwrap_or_else(|| vec![HUMAN_VERIFICATION_CAPTCHA_TYPE.to_string()]);
+        let web_url = details
+            .and_then(|details| details.web_url.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "https://verify.proton.me/?methods={}&token={challenge_token}",
+                    methods.join(",")
+                )
+            });
+
+        Self {
+            challenge_token,
+            methods,
+            web_url,
+            title: details.and_then(|details| details.title.clone()),
+            description: details.and_then(|details| details.description.clone()),
+            expires_at: details.and_then(|details| details.expires_at),
+            debug_details,
+        }
+    }
+
+    pub fn web_url(&self) -> &str {
+        &self.web_url
+    }
+
+    pub fn token_type(&self) -> &str {
+        self.methods
+            .first()
+            .map(|method| method.as_str())
+            .unwrap_or(HUMAN_VERIFICATION_CAPTCHA_TYPE)
+    }
+
+    pub fn supports_captcha(&self) -> bool {
+        self.methods
+            .iter()
+            .any(|method| method.eq_ignore_ascii_case(HUMAN_VERIFICATION_CAPTCHA_TYPE))
+    }
+}
+
+impl std::fmt::Display for HumanVerificationChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "human verification required (methods={}; url={})",
+            self.methods.join(","),
+            self.web_url
+        )?;
+        if let Some(details) = self.debug_details.as_deref() {
+            write!(f, "; {details}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for HumanVerificationChallenge {}
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct SessionForkBody {
@@ -1036,6 +1165,37 @@ mod tests {
         assert_eq!(headers.get("sec-fetch-mode").unwrap(), "cors");
         assert_eq!(headers.get("sec-fetch-site").unwrap(), "same-origin");
         assert_eq!(headers.get("sec-gpc").unwrap(), "1");
+    }
+
+    #[test]
+    fn human_verification_request_headers_match_capture() {
+        let headers = human_verification_request_headers("challenge-token:resolved-token");
+        assert_eq!(
+            headers.get("x-pm-human-verification-token").unwrap(),
+            "challenge-token:resolved-token"
+        );
+        assert_eq!(
+            headers.get("x-pm-human-verification-token-type").unwrap(),
+            "captcha"
+        );
+    }
+
+    #[test]
+    fn parses_human_verification_challenge_shape() {
+        let challenge = HumanVerificationChallenge::from_response(
+            r#"{"Code":9001,"Error":"For security reasons, please complete CAPTCHA.","Details":{"HumanVerificationToken":"E-Psio7Nfo8DkBIuQu9niLA3","HumanVerificationMethods":["captcha"],"Title":"Human Verification","Description":"","WebUrl":"https://verify.proton.me/?methods=captcha&token=E-Psio7Nfo8DkBIuQu9niLA3","ExpiresAt":1779826106}}"#,
+            "fallback-token",
+            None,
+        );
+
+        assert_eq!(challenge.challenge_token, "E-Psio7Nfo8DkBIuQu9niLA3");
+        assert_eq!(challenge.methods, vec!["captcha"]);
+        assert_eq!(
+            challenge.web_url(),
+            "https://verify.proton.me/?methods=captcha&token=E-Psio7Nfo8DkBIuQu9niLA3"
+        );
+        assert_eq!(challenge.token_type(), "captcha");
+        assert!(challenge.supports_captcha());
     }
 
     #[test]

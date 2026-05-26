@@ -319,6 +319,7 @@ async fn login(
     debug_http: bool,
 ) -> Result<()> {
     let registry = ProtonAccountRegistry::from_auth(config)?;
+    let human_verification_token = args.human_verification_token.clone();
     let session = if let Some(account_name) = args.account.as_deref() {
         let account = registry.get_required(account_name)?;
         ensure_username_matches_account(args.username.as_deref(), account)?;
@@ -327,7 +328,7 @@ async fn login(
             account,
             args.password,
             args.totp,
-            args.human_verification_token.as_deref(),
+            human_verification_token.clone(),
             debug_http,
         )
         .await?;
@@ -340,7 +341,7 @@ async fn login(
                 account,
                 args.password,
                 args.totp,
-                args.human_verification_token.as_deref(),
+                human_verification_token.clone(),
                 debug_http,
             )
             .await?;
@@ -354,7 +355,7 @@ async fn login(
                 password,
                 args.totp,
                 args.no_prompt,
-                args.human_verification_token.as_deref(),
+                human_verification_token.clone(),
                 debug_http,
             )
             .await?;
@@ -371,7 +372,7 @@ async fn login(
             account,
             args.password,
             args.totp,
-            args.human_verification_token.as_deref(),
+            human_verification_token,
             debug_http,
         )
         .await?;

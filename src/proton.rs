@@ -1,10 +1,12 @@
+use std::io::{self, IsTerminal, Write};
+
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose};
 use serde_json::json;
 use tracing::warn;
 
 use crate::accounts::ProtonAccount;
-use crate::api::{AuthTokens, ProtonAccessToken, ProtonApiClient};
+use crate::api::{AuthTokens, HumanVerificationChallenge, ProtonAccessToken, ProtonApiClient};
 use crate::auth::{calculate_srp_proof, resolve_two_factor_code};
 use crate::config::RuntimeContext;
 use crate::state::{ProtonSessionState, StateStore};
@@ -53,7 +55,7 @@ pub async fn login_with_prompts(
     password: String,
     totp_input: Option<String>,
     no_prompt: bool,
-    human_verification_token: Option<&str>,
+    mut human_verification_token: Option<String>,
     debug_http: bool,
 ) -> Result<AuthTokens> {
     let api = if debug_http {
@@ -62,9 +64,22 @@ pub async fn login_with_prompts(
         ProtonApiClient::from_context(context)?
     };
     let bootstrap = api.create_unauth_session().await?;
-    let info = api
-        .auth_info(&bootstrap, username, human_verification_token)
-        .await?;
+    let info = loop {
+        match api
+            .auth_info(&bootstrap, username, human_verification_token.as_deref())
+            .await
+        {
+            Ok(info) => break info,
+            Err(error) => {
+                let challenge = match error.downcast_ref::<HumanVerificationChallenge>() {
+                    Some(challenge) => challenge.clone(),
+                    None => return Err(error),
+                };
+                human_verification_token =
+                    Some(prompt_human_verification_token(&challenge, no_prompt)?);
+            }
+        }
+    };
     if !matches!(info.version, 3 | 4) {
         bail!("unsupported Proton SRP auth version {}", info.version);
     }
@@ -88,16 +103,29 @@ pub async fn login_with_prompts(
         &info.modulus,
         &info.server_ephemeral,
     )?;
-    let auth_response = api
-        .authenticate(
-            &bootstrap,
-            username,
-            &proof,
-            None,
-            human_verification_token,
-            &info.srp_session,
-        )
-        .await?;
+    let auth_response = loop {
+        match api
+            .authenticate(
+                &bootstrap,
+                username,
+                &proof,
+                None,
+                human_verification_token.as_deref(),
+                &info.srp_session,
+            )
+            .await
+        {
+            Ok(response) => break response,
+            Err(error) => {
+                let challenge = match error.downcast_ref::<HumanVerificationChallenge>() {
+                    Some(challenge) => challenge.clone(),
+                    None => return Err(error),
+                };
+                human_verification_token =
+                    Some(prompt_human_verification_token(&challenge, no_prompt)?);
+            }
+        }
+    };
     verify_server_proof(
         auth_response.server_proof.as_deref(),
         &proof.expected_server_proof,
@@ -130,7 +158,7 @@ pub async fn login_configured_account(
     account: &ProtonAccount,
     password_override: Option<String>,
     totp_override: Option<String>,
-    human_verification_token: Option<&str>,
+    human_verification_token: Option<String>,
     debug_http: bool,
 ) -> Result<AuthTokens> {
     let password = match password_override {
@@ -158,6 +186,56 @@ pub async fn login_configured_account(
         debug_http,
     )
     .await
+}
+
+fn prompt_human_verification_token(
+    challenge: &HumanVerificationChallenge,
+    no_prompt: bool,
+) -> Result<String> {
+    if no_prompt || !io::stdin().is_terminal() {
+        bail!(human_verification_headless_error(challenge));
+    }
+
+    let mut stderr = io::stderr().lock();
+    writeln!(stderr)?;
+    if let Some(title) = challenge.title.as_deref() {
+        writeln!(stderr, "{title}")?;
+    }
+    if let Some(description) = challenge.description.as_deref()
+        && !description.trim().is_empty()
+    {
+        writeln!(stderr, "{description}")?;
+    }
+    writeln!(stderr, "Proton CAPTCHA is required to continue.")?;
+    writeln!(
+        stderr,
+        "Open this URL in a browser and complete the challenge:"
+    )?;
+    writeln!(stderr, "  {}", challenge.web_url())?;
+    if let Some(expires_at) = challenge.expires_at {
+        writeln!(stderr, "Challenge expires at UNIX time {expires_at}.")?;
+    }
+    write!(
+        stderr,
+        "Paste the resolved verification token from Proton, then press Enter: "
+    )?;
+    stderr.flush()?;
+
+    let mut token = String::new();
+    io::stdin().read_line(&mut token)?;
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("verification token is required after completing the CAPTCHA");
+    }
+
+    Ok(token.to_string())
+}
+
+fn human_verification_headless_error(challenge: &HumanVerificationChallenge) -> String {
+    format!(
+        "Proton CAPTCHA is required. Open {} in a browser and complete it, then rerun with --human-verification-token <resolved token>. For a first-time bootstrap, run `pso auth login` once in an interactive terminal so PSO can initialize the stored session database before headless runs.",
+        challenge.web_url()
+    )
 }
 
 pub async fn refresh_stored_proton_session(
