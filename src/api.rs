@@ -785,9 +785,11 @@ struct AuthTokensWire {
     access_token: String,
     #[serde(alias = "refresh_token")]
     refresh_token: String,
-    #[serde(default, alias = "UID", alias = "Uid")]
-    uid_pascal: Option<String>,
-    #[serde(default, alias = "uid")]
+    #[serde(default, rename = "UID")]
+    uid_upper: Option<String>,
+    #[serde(default, rename = "Uid")]
+    uid_title: Option<String>,
+    #[serde(default, rename = "uid")]
     uid_lower: Option<String>,
     #[serde(default, alias = "TokenType", alias = "token_type")]
     token_type: Option<String>,
@@ -800,7 +802,7 @@ impl From<AuthTokensWire> for AuthTokens {
         Self {
             access_token: value.access_token,
             refresh_token: value.refresh_token,
-            uid: value.uid_lower.or(value.uid_pascal),
+            uid: value.uid_lower.or(value.uid_title).or(value.uid_upper),
             token_type: value.token_type,
             expires_in: value.expires_in,
         }
@@ -1541,7 +1543,7 @@ mod tests {
         let response: AuthResponse = serde_json::from_str(
             r#"{
                 "UID": "uid-from-uppercase",
-                "uid": "uid-from-lowercase",
+                "Uid": "uid-from-mixed-case",
                 "AccessToken": "access-token",
                 "RefreshToken": "refresh-token",
                 "ServerProof": "server-proof"
@@ -1549,7 +1551,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(response.tokens.uid.as_deref(), Some("uid-from-lowercase"));
+        assert_eq!(response.tokens.uid.as_deref(), Some("uid-from-mixed-case"));
         assert_eq!(response.tokens.access_token, "access-token");
         assert_eq!(response.tokens.refresh_token, "refresh-token");
     }
