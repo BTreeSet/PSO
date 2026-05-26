@@ -163,7 +163,7 @@ pub async fn run_supervisor(
         token_states: Arc::new(token_states),
     };
 
-    if let Some(account) = topology_account_name(&runtime) {
+    if let Some(account) = topology_account_name(&runtime.topology, &runtime.specs) {
         refresh_topology(&runtime, &account).await?;
     }
     supervise_once(&runtime).await?;
@@ -179,7 +179,7 @@ async fn run_continuous(runtime: SupervisorRuntime) -> Result<()> {
     let deploy_runtime = runtime.clone();
     tokio::spawn(async move { deployment_loop(deploy_runtime, deploy_rx).await });
 
-    if let Some(account) = topology_account_name(&runtime) {
+    if let Some(account) = topology_account_name(&runtime.topology, &runtime.specs) {
         let topology_runtime = runtime.clone();
         let topology_tx = deploy_tx.clone();
         tokio::spawn(async move { topology_loop(topology_runtime, account, topology_tx).await });
@@ -249,7 +249,7 @@ async fn outbound_loop(
             Ok(false) => {}
             Err(error) => {
                 error!(tag = %spec.tag(), %error, "outbound supervisor cycle failed");
-                let username = endpoint_username(&runtime, &spec);
+                let username = endpoint_username(&runtime.proton_accounts, &spec);
                 record_runtime_error(
                     &runtime.context,
                     username,
@@ -329,7 +329,7 @@ async fn process_proton_endpoint(
     spec: &ProtonEndpointSpec,
     force_refresh: bool,
 ) -> Result<bool> {
-    let topology = load_topology(runtime)?;
+    let topology = load_topology(&runtime.context, &runtime.render, &runtime.topology)?;
     let session = runtime
         .sessions
         .get(&spec.account)
@@ -337,7 +337,7 @@ async fn process_proton_endpoint(
     let selected = select_target(&topology, &spec.filter, session)?;
     let access_token = access_token_for_account(runtime, &spec.account).await?;
     let cert_changed = ensure_certificate(
-        runtime,
+        &runtime.context,
         spec,
         &session.username,
         &selected.physical,
@@ -352,7 +352,8 @@ async fn process_proton_endpoint(
 
     let store = StateStore::open(&runtime.context)?;
     let probe = probe_endpoint_once(
-        runtime,
+        &runtime.context,
+        &runtime.options,
         Some(&session.username),
         &spec.tag,
         spec.health_proxy_url.as_deref(),
@@ -374,7 +375,7 @@ async fn process_proton_endpoint(
         Some(&details),
     )?;
     ensure_certificate(
-        runtime,
+        &runtime.context,
         spec,
         &session.username,
         &selected.physical,
@@ -390,15 +391,26 @@ async fn process_static_wireguard_endpoint(
     spec: &StaticWireGuardEndpointSpec,
     force_refresh: bool,
 ) -> Result<bool> {
-    let state_changed =
-        ensure_static_wireguard_endpoint_state(runtime, spec, force_refresh).await?;
+    let state_changed = ensure_static_wireguard_endpoint_state(
+        &runtime.context,
+        &runtime.providers,
+        spec,
+        force_refresh,
+    )
+    .await?;
     if state_changed || !rendered_output_path(&runtime.context, &runtime.render).exists() {
         return Ok(true);
     }
 
     let store = StateStore::open(&runtime.context)?;
-    let probe =
-        probe_endpoint_once(runtime, None, &spec.tag, spec.health_proxy_url.as_deref()).await?;
+    let probe = probe_endpoint_once(
+        &runtime.context,
+        &runtime.options,
+        None,
+        &spec.tag,
+        spec.health_proxy_url.as_deref(),
+    )
+    .await?;
 
     if probe.status == HealthStatus::Healthy {
         return Ok(state_changed);
@@ -415,16 +427,16 @@ async fn process_static_wireguard_endpoint(
         "health_reselection_requested",
         Some(&details),
     )?;
-    ensure_static_wireguard_endpoint_state(runtime, spec, true).await
+    ensure_static_wireguard_endpoint_state(&runtime.context, &runtime.providers, spec, true).await
 }
 
 async fn ensure_static_wireguard_endpoint_state(
-    runtime: &SupervisorRuntime,
+    context: &RuntimeContext,
+    providers: &ProvidersConfig,
     spec: &StaticWireGuardEndpointSpec,
     force_reselect: bool,
 ) -> Result<bool> {
-    let provider = runtime
-        .providers
+    let provider = providers
         .wireguard_provider(&spec.provider)
         .with_context(|| {
             format!(
@@ -433,7 +445,7 @@ async fn ensure_static_wireguard_endpoint_state(
             )
         })?;
     let provider = resolve_wireguard_provider_catalog(provider).await?;
-    let store = StateStore::open(&runtime.context)?;
+    let store = StateStore::open(context)?;
     let current = store.load_wireguard_endpoint_state(&spec.tag)?;
     let avoid_server_id = force_reselect
         .then(|| current.as_ref().map(|state| state.server_id.as_str()))
@@ -503,20 +515,20 @@ async fn ensure_static_wireguard_endpoint_state(
 }
 
 async fn probe_endpoint_once(
-    runtime: &SupervisorRuntime,
+    context: &RuntimeContext,
+    options: &SupervisorOptions,
     username: Option<&str>,
     outbound_tag: &str,
     health_proxy_url: Option<&str>,
 ) -> Result<ProbeResult> {
-    let raw_ip = runtime
-        .options
+    let raw_ip = options
         .raw_ip
         .as_deref()
         .context("raw IP baseline was not initialized")?;
-    let monitor = HealthMonitor::new(raw_ip.to_owned(), runtime.options.interval)?;
-    let proxy_url = health_proxy_url.or(runtime.options.proxy_url.as_deref());
+    let monitor = HealthMonitor::new(raw_ip.to_owned(), options.interval)?;
+    let proxy_url = health_proxy_url.or(options.proxy_url.as_deref());
     let probe = monitor.probe_once(proxy_url).await;
-    StateStore::open(&runtime.context)?.record_health(HealthRecord {
+    StateStore::open(context)?.record_health(HealthRecord {
         username,
         outbound_tag: Some(outbound_tag),
         status: &format!("{:?}", probe.status),
@@ -528,14 +540,14 @@ async fn probe_endpoint_once(
 }
 
 async fn ensure_certificate(
-    runtime: &SupervisorRuntime,
+    context: &RuntimeContext,
     spec: &ProtonEndpointSpec,
     username: &str,
     server: &PhysicalServer,
     access_token: &ProtonAccessToken,
     force_refresh: bool,
 ) -> Result<bool> {
-    let store = StateStore::open(&runtime.context)?;
+    let store = StateStore::open(context)?;
     let current = store.load_outbound_certificate(&spec.tag)?;
     let now_ms = current_time_ms();
     let server_id = stable_server_id(server);
@@ -603,14 +615,14 @@ async fn ensure_certificate(
         .or_else(|| current.as_ref().map(|state| state.public_key.as_str()))
         .context("missing outbound certificate public key state")?;
 
-    let api = ProtonApiClient::from_context(&runtime.context)?;
+    let api = ProtonApiClient::from_context(context)?;
     let should_extend_expiry = current
         .as_ref()
         .and_then(|state| state.profile_id.as_deref())
         .is_some();
     let request = CertificateRequest::persistent_wireguard(
         public_key_base64,
-        &runtime.context.proton_client.device_name,
+        &context.proton_client.device_name,
         proton_persistent_certificate_features(server)?,
         should_extend_expiry,
     )?;
@@ -811,19 +823,23 @@ async fn refresh_topology(runtime: &SupervisorRuntime, account_name: &str) -> Re
             )?;
         }
         Err(error) => {
-            load_topology(runtime).with_context(|| {
-                format!("topology fetch failed and no usable fallback was found: {error:#}")
-            })?;
+            load_topology(&runtime.context, &runtime.render, &runtime.topology).with_context(
+                || format!("topology fetch failed and no usable fallback was found: {error:#}"),
+            )?;
             warn!(%error, "using existing topology state after fetch failure");
         }
     }
     Ok(())
 }
 
-fn load_topology(runtime: &SupervisorRuntime) -> Result<Vec<LogicalServer>> {
-    let primary = topology_output_path(&runtime.context, &runtime.render);
-    let state = topology_state_file(&runtime.context);
-    let fallback = runtime.topology.fallback_topology.as_ref();
+fn load_topology(
+    context: &RuntimeContext,
+    render: &RenderConfig,
+    topology: &TopologyConfig,
+) -> Result<Vec<LogicalServer>> {
+    let primary = topology_output_path(context, render);
+    let state = topology_state_file(context);
+    let fallback = topology.fallback_topology.as_ref();
     for path in [Some(&primary), Some(&state), fallback]
         .into_iter()
         .flatten()
@@ -848,7 +864,7 @@ async fn access_token_for_account(
         }
         return Ok(ProtonAccessToken::new(
             access_token.clone(),
-            stored_uid_for_account(runtime, account_name),
+            stored_uid_for_account(&runtime.proton_accounts, &runtime.context, account_name),
         ));
     }
 
@@ -868,12 +884,11 @@ async fn access_token_for_account(
         })
 }
 
-fn topology_account_name(runtime: &SupervisorRuntime) -> Option<String> {
-    runtime
-        .topology
+fn topology_account_name(topology: &TopologyConfig, specs: &[EndpointSpec]) -> Option<String> {
+    topology
         .account
         .clone()
-        .or_else(|| first_proton_account_name(&runtime.specs))
+        .or_else(|| first_proton_account_name(specs))
 }
 
 fn first_proton_account_name(specs: &[EndpointSpec]) -> Option<String> {
@@ -884,21 +899,24 @@ fn first_proton_account_name(specs: &[EndpointSpec]) -> Option<String> {
 }
 
 fn endpoint_username<'a>(
-    runtime: &'a SupervisorRuntime,
+    proton_accounts: &'a ProtonAccountRegistry,
     spec: &'a EndpointSpec,
 ) -> Option<&'a str> {
     match spec {
-        EndpointSpec::Proton(spec) => runtime
-            .proton_accounts
+        EndpointSpec::Proton(spec) => proton_accounts
             .get(&spec.account)
             .map(|account| account.username.as_str()),
         EndpointSpec::StaticWireGuard(_) => None,
     }
 }
 
-fn stored_uid_for_account(runtime: &SupervisorRuntime, account_name: &str) -> Option<String> {
-    let account = runtime.proton_accounts.get(account_name)?;
-    StateStore::open(&runtime.context)
+fn stored_uid_for_account(
+    proton_accounts: &ProtonAccountRegistry,
+    context: &RuntimeContext,
+    account_name: &str,
+) -> Option<String> {
+    let account = proton_accounts.get(account_name)?;
+    StateStore::open(context)
         .ok()?
         .load_proton_session(&account.username)
         .ok()
