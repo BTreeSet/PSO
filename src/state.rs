@@ -51,7 +51,10 @@ impl StateStore {
         self.record_event(Some(username), None, "proton_session_updated", None)
     }
 
-    pub fn load_proton_session(&self, username: &str) -> Result<ProtonSessionState> {
+    pub fn load_proton_session_optional(
+        &self,
+        username: &str,
+    ) -> Result<Option<ProtonSessionState>> {
         let account_key = user_state_key(username);
         self.connection
             .query_row(
@@ -64,7 +67,12 @@ impl StateStore {
                     })
                 },
             )
-            .optional()?
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn load_proton_session(&self, username: &str) -> Result<ProtonSessionState> {
+        self.load_proton_session_optional(username)?
             .with_context(|| format!("Proton session state was not found for {username}"))
     }
 
@@ -753,5 +761,12 @@ mod tests {
         assert_eq!(cert.username, "alice@example.com");
         assert_eq!(cert.private_key, "private");
         assert_eq!(store.list_certificates(10).unwrap().len(), 1);
+
+        assert!(
+            store
+                .load_proton_session_optional("bob@example.com")
+                .unwrap()
+                .is_none()
+        );
     }
 }

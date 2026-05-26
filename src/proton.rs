@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose};
+use serde_json::json;
+use tracing::warn;
 
 use crate::accounts::ProtonAccount;
 use crate::api::{AuthTokens, ProtonAccessToken, ProtonApiClient};
@@ -16,6 +18,12 @@ pub struct CachedAccessToken {
     pub access_token: Option<String>,
     pub uid: Option<String>,
     pub expires_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionLoginReason {
+    MissingStoredSession,
+    RefreshFailure,
 }
 
 impl CachedAccessToken {
@@ -166,12 +174,8 @@ pub fn persist_proton_session(
     state_uid: Option<&str>,
     tokens: &AuthTokens,
 ) -> Result<()> {
-    let uid = tokens
-        .uid
-        .as_deref()
-        .or(state_uid)
-        .context("Proton token response did not include UID for session state")?;
-    StateStore::open(context)?.store_proton_session(username, uid, &tokens.refresh_token)
+    let store = StateStore::open(context)?;
+    store_tokens_in_state(&store, username, state_uid, tokens)
 }
 
 pub async fn ensure_account_access_token(
@@ -184,39 +188,171 @@ pub async fn ensure_account_access_token(
     }
 
     let store = StateStore::open(context)?;
-    match store.load_proton_session(&account.username) {
-        Ok(state) => match refresh_stored_proton_session(context, &state).await {
+    match store.load_proton_session_optional(&account.username)? {
+        Some(state) => match refresh_stored_proton_session(context, &state).await {
             Ok(tokens) => {
-                persist_proton_session(context, &account.username, Some(&state.uid), &tokens)?;
+                store_tokens_in_state(&store, &account.username, Some(&state.uid), &tokens)?;
                 cache.store(&tokens, Some(&state.uid));
                 Ok(ProtonAccessToken::from_tokens(&tokens, Some(&state.uid)))
             }
-            Err(_refresh_error) => {
-                if account.no_prompt {
-                    account.ensure_can_login_headless()?;
-                }
-                let tokens = login_configured_account(context, account, None, None, None, false)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to refresh and then re-login Proton account '{}'",
-                            account.name
-                        )
-                    })?;
-                persist_proton_session(context, &account.username, None, &tokens)?;
-                cache.store(&tokens, None);
-                Ok(ProtonAccessToken::from_tokens(&tokens, None))
+            Err(refresh_error) => {
+                let refresh_error_message = refresh_error.to_string();
+                record_session_event(
+                    &store,
+                    &account.username,
+                    "proton_session_refresh_failed",
+                    json!({
+                        "account": account.name,
+                        "error": refresh_error_message,
+                    }),
+                );
+                login_and_store_account_access_token(
+                    context,
+                    account,
+                    cache,
+                    Some(&state.uid),
+                    SessionLoginReason::RefreshFailure,
+                    Some(refresh_error_message.as_str()),
+                )
+                .await
             }
         },
-        Err(_) => {
-            if account.no_prompt {
-                account.ensure_can_login_headless()?;
-            }
-            let tokens =
-                login_configured_account(context, account, None, None, None, false).await?;
-            persist_proton_session(context, &account.username, None, &tokens)?;
-            cache.store(&tokens, None);
-            Ok(ProtonAccessToken::from_tokens(&tokens, None))
+        None => {
+            login_and_store_account_access_token(
+                context,
+                account,
+                cache,
+                None,
+                SessionLoginReason::MissingStoredSession,
+                None,
+            )
+            .await
+        }
+    }
+}
+
+fn resolve_session_uid<'a>(
+    tokens: &'a AuthTokens,
+    fallback_uid: Option<&'a str>,
+) -> Result<&'a str> {
+    tokens
+        .uid
+        .as_deref()
+        .or(fallback_uid)
+        .context("Proton token response did not include UID for session state")
+}
+
+fn store_tokens_in_state(
+    store: &StateStore,
+    username: &str,
+    state_uid: Option<&str>,
+    tokens: &AuthTokens,
+) -> Result<()> {
+    let uid = resolve_session_uid(tokens, state_uid)?;
+    store.store_proton_session(username, uid, &tokens.refresh_token)
+}
+
+async fn login_and_store_account_access_token(
+    context: &RuntimeContext,
+    account: &ProtonAccount,
+    cache: &mut CachedAccessToken,
+    fallback_uid: Option<&str>,
+    reason: SessionLoginReason,
+    refresh_error: Option<&str>,
+) -> Result<ProtonAccessToken> {
+    if account.no_prompt {
+        account
+            .ensure_can_login_headless()
+            .with_context(|| headless_relogin_error(account, reason, refresh_error))?;
+    }
+
+    let tokens = login_configured_account(context, account, None, None, None, false)
+        .await
+        .with_context(|| login_error_context(account, reason, refresh_error))?;
+    let store = StateStore::open(context)?;
+    store_tokens_in_state(&store, &account.username, fallback_uid, &tokens)?;
+    cache.store(&tokens, fallback_uid);
+
+    record_session_event(
+        &store,
+        &account.username,
+        reason.event_type(),
+        json!({
+            "account": account.name,
+            "reason": reason.reason_label(),
+        }),
+    );
+
+    Ok(ProtonAccessToken::from_tokens(&tokens, fallback_uid))
+}
+
+fn headless_relogin_error(
+    account: &ProtonAccount,
+    reason: SessionLoginReason,
+    refresh_error: Option<&str>,
+) -> String {
+    match reason {
+        SessionLoginReason::MissingStoredSession => format!(
+            "Proton account '{}' has no stored session and cannot log in headlessly without password or password_file",
+            account.name
+        ),
+        SessionLoginReason::RefreshFailure => format!(
+            "stored Proton session refresh failed for account '{}' and headless re-login is unavailable: {}",
+            account.name,
+            refresh_error.unwrap_or("refresh failed")
+        ),
+    }
+}
+
+fn login_error_context(
+    account: &ProtonAccount,
+    reason: SessionLoginReason,
+    refresh_error: Option<&str>,
+) -> String {
+    match reason {
+        SessionLoginReason::MissingStoredSession => format!(
+            "failed to log in Proton account '{}' because no stored session exists",
+            account.name
+        ),
+        SessionLoginReason::RefreshFailure => format!(
+            "stored Proton session refresh failed for account '{}' ({}); re-login also failed",
+            account.name,
+            refresh_error.unwrap_or("refresh failed")
+        ),
+    }
+}
+
+fn record_session_event(
+    store: &StateStore,
+    username: &str,
+    event_type: &str,
+    details: serde_json::Value,
+) {
+    let details_json = match serde_json::to_string(&details) {
+        Ok(details_json) => details_json,
+        Err(error) => {
+            warn!(%error, username = %username, event_type = %event_type, "failed to encode Proton session event details");
+            return;
+        }
+    };
+
+    if let Err(error) = store.record_event(Some(username), None, event_type, Some(&details_json)) {
+        warn!(%error, username = %username, event_type = %event_type, "failed to record Proton session event");
+    }
+}
+
+impl SessionLoginReason {
+    fn event_type(self) -> &'static str {
+        match self {
+            Self::MissingStoredSession => "proton_session_login_succeeded",
+            Self::RefreshFailure => "proton_session_relogin_succeeded",
+        }
+    }
+
+    fn reason_label(self) -> &'static str {
+        match self {
+            Self::MissingStoredSession => "missing_stored_session",
+            Self::RefreshFailure => "refresh_failure",
         }
     }
 }
@@ -247,4 +383,43 @@ fn decode_proof(value: &str, label: &str) -> Result<Vec<u8>> {
         .decode(value)
         .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(value))
         .with_context(|| format!("invalid {label}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_access_token_uses_fallback_uid() {
+        let mut cache = CachedAccessToken::default();
+        let tokens = AuthTokens {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            uid: None,
+            token_type: None,
+            expires_in: Some(120),
+        };
+
+        cache.store(&tokens, Some("uid-from-state"));
+
+        let token = cache.fresh_token().expect("cached token should be fresh");
+        assert_eq!(token.access_token, "access");
+        assert_eq!(token.uid.as_deref(), Some("uid-from-state"));
+    }
+
+    #[test]
+    fn cached_access_token_requires_valid_expiry() {
+        let mut cache = CachedAccessToken::default();
+        let tokens = AuthTokens {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            uid: Some("uid-from-token".into()),
+            token_type: None,
+            expires_in: Some(0),
+        };
+
+        cache.store(&tokens, None);
+
+        assert!(cache.fresh_token().is_none());
+    }
 }

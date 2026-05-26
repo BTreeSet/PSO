@@ -45,6 +45,8 @@ pso --config /etc/pso/pso.config.json --state-dir /var/lib/pso run
 
 On startup, `run` reads every provider-tagged WireGuard endpoint in the template. Proton endpoints bind to named accounts declared in `auth.proton.accounts`; each account refreshes its stored Proton auth session from SQLite or logs in again from configured credentials as needed. Non-Proton WireGuard providers select from `providers.wireguard` catalogs, which may be operator-supplied or fetched from a public provider source, and keep local key material in SQLite. PSO then deploys one combined `sing-box` config. In continuous mode, PSO runs independent endpoint loops for health checks and certificate rotation or server reselection, plus a Proton topology loop when Proton endpoints are present. Endpoint changes are coalesced before rendering, so several updates produce one validated config replacement and one SIGHUP.
 
+When a stored Proton refresh token fails during `run`, PSO falls back to a full login for that configured account when headless credentials are available and records the recovery in runtime events.
+
 Proton account usage is intentionally explicit: one active Proton WireGuard endpoint should map to one configured Proton account. If you want several simultaneous Proton exits in different countries, provision several Proton accounts and bind each endpoint to a distinct account in the template.
 
 Certificate and key state is stored per endpoint in `pso.sqlite3`. PSO requests a new `/vpn/v1/certificate` before Proton's refresh timestamp, retries temporary failures, rotates local key material after repeated failures, and records the full process in SQLite. If health reports `Dead` or `Leaking`, the affected endpoint immediately attempts a certificate refresh and triggers a coalesced redeploy.
@@ -200,7 +202,7 @@ pso --state-dir /var/lib/pso state events --limit 100
 pso --state-dir /var/lib/pso state health --limit 100 --json
 ```
 
-`state accounts` shows known Proton account keys, usernames, and whether a stored Proton session exists. `state certs` shows Proton certificate metadata, selected server, endpoint address, assigned tunnel IP, refresh/expiration times, and failure count without printing private keys. `state wireguard` shows provider-agnostic WireGuard endpoint state for Proton and static providers without printing private keys. `state events` shows runtime events such as session updates and health-triggered certificate refresh outcomes. `state health` shows probe history with raw IP, returned IP, status, and reason.
+`state accounts` shows known Proton account keys, usernames, and whether a stored Proton session exists. `state certs` shows Proton certificate metadata, selected server, endpoint address, assigned tunnel IP, refresh/expiration times, and failure count without printing private keys. `state wireguard` shows provider-agnostic WireGuard endpoint state for Proton and static providers without printing private keys. `state events` shows runtime events such as session updates, refresh-failure fallback re-logins, and health-triggered certificate refresh outcomes. `state health` shows probe history with raw IP, returned IP, status, and reason.
 
 ## Containers
 

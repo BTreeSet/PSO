@@ -410,7 +410,18 @@ async fn refresh_vpn_token(
     };
     let store = StateStore::open(context)?;
     let state = store.load_proton_session(&username)?;
-    let refreshed = refresh_stored_proton_session(context, &state).await?;
+    let relogin_hint = args
+        .account
+        .as_deref()
+        .map(|account| format!("pso auth login --account {account}"))
+        .unwrap_or_else(|| format!("pso auth login --username {username}"));
+    let refreshed = refresh_stored_proton_session(context, &state)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to refresh stored Proton session for {username}; if the stored session is expired or revoked, re-authenticate with '{relogin_hint}'"
+            )
+        })?;
     persist_proton_session(context, &username, Some(&state.uid), &refreshed)?;
 
     if let Some(output) = args.output {
