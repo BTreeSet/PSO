@@ -594,11 +594,15 @@ async fn ensure_certificate(
     };
 
     let api = ProtonApiClient::from_context(&runtime.context)?;
+    let should_extend_expiry = current
+        .as_ref()
+        .and_then(|state| state.profile_id.as_deref())
+        .is_some();
     let request = CertificateRequest::persistent_wireguard(
         &key_material.public_key_base64,
         &runtime.context.proton_client.device_name,
         proton_persistent_certificate_features(server)?,
-        current.is_some(),
+        should_extend_expiry,
     )?;
     let certificate = match api.get_certificate(access_token, &request).await {
         Ok(certificate) => certificate,
@@ -607,7 +611,35 @@ async fn ensure_certificate(
             return Err(error);
         }
     };
-    persist_certificate(&store, spec, username, server, &key_material, &certificate)?;
+    let current_profile_id = current
+        .as_ref()
+        .and_then(|state| state.profile_id.as_deref());
+    let expected_assigned_ip = certificate.assigned_ip.as_deref().or_else(|| {
+        current
+            .as_ref()
+            .and_then(|state| state.assigned_ip.as_deref())
+    });
+    let expected_endpoint = certificate
+        .endpoint
+        .as_deref()
+        .or_else(|| current.as_ref().map(|state| state.endpoint.as_str()));
+    let profile_id = resolve_profile_id_for_extension(
+        &api,
+        access_token,
+        current_profile_id,
+        expected_assigned_ip,
+        expected_endpoint,
+    )
+    .await;
+    persist_certificate(
+        &store,
+        spec,
+        username,
+        server,
+        &key_material,
+        &certificate,
+        profile_id.as_deref(),
+    )?;
     Ok(true)
 }
 
@@ -618,6 +650,7 @@ fn persist_certificate(
     server: &PhysicalServer,
     key_material: &KeyMaterial,
     certificate: &CertificateResponse,
+    profile_id: Option<&str>,
 ) -> Result<()> {
     let endpoint = server.proton_wireguard_endpoint().with_context(|| {
         format!(
@@ -634,6 +667,7 @@ fn persist_certificate(
     store.store_outbound_certificate_success(OutboundCertificateUpdate {
         outbound_tag: &spec.tag,
         username,
+        profile_id,
         server_id: &stable_server_id(server),
         server_name: &server.name,
         endpoint: &endpoint,
@@ -644,6 +678,37 @@ fn persist_certificate(
         expires_at_ms: certificate.expiration_time_ms()? as i64,
         refresh_at_ms: certificate.refresh_time_ms()? as i64,
     })
+}
+
+async fn resolve_profile_id_for_extension(
+    api: &ProtonApiClient,
+    access_token: &ProtonAccessToken,
+    current_profile_id: Option<&str>,
+    expected_assigned_ip: Option<&str>,
+    expected_endpoint: Option<&str>,
+) -> Option<String> {
+    if let Some(profile_id) = current_profile_id {
+        return Some(profile_id.to_string());
+    }
+
+    let profiles = match api.list_persistent_certificates(access_token).await {
+        Ok(profiles) => profiles,
+        Err(error) => {
+            warn!(%error, "failed to list persistent Proton certificate profiles for extension lookup");
+            return None;
+        }
+    };
+
+    profiles
+        .into_iter()
+        .find(|profile| {
+            profile.profile_id.is_some()
+                && (expected_assigned_ip
+                    .is_some_and(|assigned_ip| profile.assigned_ip.as_deref() == Some(assigned_ip))
+                    || expected_endpoint
+                        .is_some_and(|endpoint| profile.endpoint.as_deref() == Some(endpoint)))
+        })
+        .and_then(|profile| profile.profile_id)
 }
 
 fn proton_persistent_certificate_features(

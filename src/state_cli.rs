@@ -60,14 +60,15 @@ fn print_certs(rows: &[CertificateRow], args: &StateListArgs) -> Result<()> {
     }
 
     println!(
-        "updated_at\toutbound\tusername\tserver\tendpoint\tassigned_ip\trefresh_at_ms\texpires_at_ms\tfailures\tlast_error"
+        "updated_at\toutbound\tusername\tprofile_id\tserver\tendpoint\tassigned_ip\trefresh_at_ms\texpires_at_ms\tfailures\tlast_error"
     );
     for row in rows {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.updated_at,
             row.outbound_tag,
             row.username,
+            row.profile_id.as_deref().unwrap_or("-"),
             row.server_name,
             row.endpoint,
             row.assigned_ip.as_deref().unwrap_or("-"),

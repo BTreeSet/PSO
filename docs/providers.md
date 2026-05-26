@@ -21,7 +21,7 @@ The WireGuard-capable provider surface tracked from Gluetun research is:
 
 | Provider | PSO mode | Notes |
 | --- | --- | --- |
-| Proton | dynamic API | Native SRP login, stored auth-session refresh, topology fetch, persistent certificate registration, local key generation, browser-style session keepalive. |
+| Proton | dynamic API | Native SRP login, stored auth-session refresh, topology fetch, persistent certificate registration and expiry extension, local key generation, browser-style session keepalive. |
 | AirVPN | static catalog | Declare endpoint, non-default WireGuard port, peer public key, pre_shared_key, assigned address, and filters. |
 | CyberGhost | static catalog | Declare provider-issued WireGuard metadata through the shared static catalog schema. |
 | FastestVPN | static catalog | Declare provider-issued WireGuard endpoint metadata. |
@@ -118,7 +118,7 @@ Proton endpoints remain dynamic and use the Proton-specific filter model:
 
 `account` references a named entry in `auth.proton.accounts`. One active Proton endpoint should map to one configured Proton account so the operator can scale out across several Proton identities cleanly.
 
-PSO's Proton dynamic API path mirrors the browser capture more closely than the older session-only flow: `core/v4/auth/info` uses `Intent: Auto`, `vpn/v1/certificate` uses persistent-mode request bodies, `vpn/v1/certificate/all?Mode=persistent&Offset=0&Limit=51` is available for inspection, and the optional `run.session_keepalive_interval_secs` loop polls `auth/v4/sessions` with authenticated access tokens.
+PSO's Proton dynamic API path mirrors the browser capture more closely than the older session-only flow: `core/v4/auth/info` uses `Intent: Auto`, `vpn/v1/certificate` uses persistent-mode request bodies, `vpn/v1/certificate/all?Mode=persistent&Offset=0&Limit=51` is available for inspection, and the optional `run.session_keepalive_interval_secs` loop polls `auth/v4/sessions` with authenticated access tokens. Certificate state persists a profile identifier so expiry extension can target known profiles efficiently.
 
 ## State and Rendering
 

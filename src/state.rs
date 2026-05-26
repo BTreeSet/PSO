@@ -194,9 +194,9 @@ impl StateStore {
     ) -> Result<Option<OutboundCertificateState>> {
         self.connection
             .query_row(
-                "SELECT outbound_tag, username, server_id, server_name, endpoint, peer_public_key,
-                        private_key, public_key, assigned_ip, expires_at_ms, refresh_at_ms,
-                        consecutive_failures, last_error, updated_at
+                "SELECT outbound_tag, username, profile_id, server_id, server_name, endpoint,
+                        peer_public_key, private_key, public_key, assigned_ip, expires_at_ms,
+                        refresh_at_ms, consecutive_failures, last_error, updated_at
                  FROM outbound_certificates
                  WHERE outbound_tag = ?1",
                 params![outbound_tag],
@@ -204,18 +204,19 @@ impl StateStore {
                     Ok(OutboundCertificateState {
                         outbound_tag: row.get(0)?,
                         username: row.get(1)?,
-                        server_id: row.get(2)?,
-                        server_name: row.get(3)?,
-                        endpoint: row.get(4)?,
-                        peer_public_key: row.get(5)?,
-                        private_key: row.get(6)?,
-                        public_key: row.get(7)?,
-                        assigned_ip: row.get(8)?,
-                        expires_at_ms: row.get(9)?,
-                        refresh_at_ms: row.get(10)?,
-                        consecutive_failures: row.get(11)?,
-                        last_error: row.get(12)?,
-                        updated_at: row.get(13)?,
+                        profile_id: row.get(2)?,
+                        server_id: row.get(3)?,
+                        server_name: row.get(4)?,
+                        endpoint: row.get(5)?,
+                        peer_public_key: row.get(6)?,
+                        private_key: row.get(7)?,
+                        public_key: row.get(8)?,
+                        assigned_ip: row.get(9)?,
+                        expires_at_ms: row.get(10)?,
+                        refresh_at_ms: row.get(11)?,
+                        consecutive_failures: row.get(12)?,
+                        last_error: row.get(13)?,
+                        updated_at: row.get(14)?,
                     })
                 },
             )
@@ -232,13 +233,14 @@ impl StateStore {
         self.upsert_account(&account_key, update.username, now)?;
         self.connection.execute(
             "INSERT INTO outbound_certificates
-               (outbound_tag, account_key, username, server_id, server_name, endpoint,
+                             (outbound_tag, account_key, username, profile_id, server_id, server_name, endpoint,
                 peer_public_key, private_key, public_key, assigned_ip, expires_at_ms,
                 refresh_at_ms, consecutive_failures, last_error, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, NULL, ?13)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, NULL, ?14)
              ON CONFLICT(outbound_tag) DO UPDATE SET
                account_key = excluded.account_key,
                username = excluded.username,
+                             profile_id = COALESCE(excluded.profile_id, outbound_certificates.profile_id),
                server_id = excluded.server_id,
                server_name = excluded.server_name,
                endpoint = excluded.endpoint,
@@ -255,6 +257,7 @@ impl StateStore {
                 update.outbound_tag,
                 account_key,
                 update.username,
+                update.profile_id,
                 update.server_id,
                 update.server_name,
                 update.endpoint,
@@ -412,7 +415,7 @@ impl StateStore {
 
     pub fn list_certificates(&self, limit: usize) -> Result<Vec<CertificateRow>> {
         let mut statement = self.connection.prepare(
-            "SELECT outbound_tag, username, server_name, endpoint, assigned_ip,
+            "SELECT outbound_tag, username, profile_id, server_name, endpoint, assigned_ip,
                     expires_at_ms, refresh_at_ms, consecutive_failures, last_error, updated_at
              FROM outbound_certificates
              ORDER BY updated_at DESC, outbound_tag ASC
@@ -422,14 +425,15 @@ impl StateStore {
             Ok(CertificateRow {
                 outbound_tag: row.get(0)?,
                 username: row.get(1)?,
-                server_name: row.get(2)?,
-                endpoint: row.get(3)?,
-                assigned_ip: row.get(4)?,
-                expires_at_ms: row.get(5)?,
-                refresh_at_ms: row.get(6)?,
-                consecutive_failures: row.get(7)?,
-                last_error: row.get(8)?,
-                updated_at: row.get(9)?,
+                profile_id: row.get(2)?,
+                server_name: row.get(3)?,
+                endpoint: row.get(4)?,
+                assigned_ip: row.get(5)?,
+                expires_at_ms: row.get(6)?,
+                refresh_at_ms: row.get(7)?,
+                consecutive_failures: row.get(8)?,
+                last_error: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })?;
         collect_rows(rows)
@@ -562,6 +566,7 @@ impl StateStore {
                              outbound_tag TEXT PRIMARY KEY,
                              account_key TEXT NOT NULL REFERENCES accounts(account_key) ON DELETE CASCADE,
                              username TEXT NOT NULL,
+                             profile_id TEXT,
                              server_id TEXT NOT NULL,
                              server_name TEXT NOT NULL,
                              endpoint TEXT NOT NULL,
@@ -616,6 +621,7 @@ impl StateStore {
                              ON config_deployments(deployed_at);",
         )?;
         self.ensure_text_column("wireguard_endpoint_states", "pre_shared_key")?;
+        self.ensure_text_column("outbound_certificates", "profile_id")?;
         Ok(())
     }
 
@@ -743,6 +749,7 @@ mod tests {
             .store_outbound_certificate_success(OutboundCertificateUpdate {
                 outbound_tag: "proton-wg",
                 username: "alice@example.com",
+                profile_id: Some("profile-1"),
                 server_id: "server-1",
                 server_name: "Server 1",
                 endpoint: "203.0.113.10:51820",
@@ -759,6 +766,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(cert.username, "alice@example.com");
+        assert_eq!(cert.profile_id.as_deref(), Some("profile-1"));
         assert_eq!(cert.private_key, "private");
         assert_eq!(store.list_certificates(10).unwrap().len(), 1);
 

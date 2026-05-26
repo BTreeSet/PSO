@@ -895,6 +895,19 @@ pub struct CertificateResponse {
     pub certificate: String,
     #[serde(
         default,
+        alias = "SerialNumber",
+        alias = "serialNumber",
+        alias = "serial_number",
+        alias = "ProfileID",
+        alias = "profileId",
+        alias = "profile_id",
+        alias = "ID",
+        alias = "Id",
+        alias = "id"
+    )]
+    pub profile_id: Option<String>,
+    #[serde(
+        default,
         alias = "ExpirationTimeMs",
         alias = "expirationTimeMs",
         alias = "expiration_time_ms"

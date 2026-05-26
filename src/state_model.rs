@@ -40,6 +40,7 @@ pub struct HealthCheckRow {
 pub struct OutboundCertificateState {
     pub outbound_tag: String,
     pub username: String,
+    pub profile_id: Option<String>,
     pub server_id: String,
     pub server_name: String,
     pub endpoint: String,
@@ -58,6 +59,7 @@ pub struct OutboundCertificateState {
 pub struct OutboundCertificateUpdate<'a> {
     pub outbound_tag: &'a str,
     pub username: &'a str,
+    pub profile_id: Option<&'a str>,
     pub server_id: &'a str,
     pub server_name: &'a str,
     pub endpoint: &'a str,
@@ -73,6 +75,7 @@ pub struct OutboundCertificateUpdate<'a> {
 pub struct CertificateRow {
     pub outbound_tag: String,
     pub username: String,
+    pub profile_id: Option<String>,
     pub server_name: String,
     pub endpoint: String,
     pub assigned_ip: Option<String>,

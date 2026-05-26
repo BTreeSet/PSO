@@ -43,7 +43,7 @@ The normal runtime path is `pso run`. It is designed for a compiled binary or co
 pso --config /etc/pso/pso.config.json --state-dir /var/lib/pso run
 ```
 
-On startup, `run` reads every provider-tagged WireGuard endpoint in the template. Proton endpoints bind to named accounts declared in `auth.proton.accounts`; each account refreshes its stored Proton auth session from SQLite or logs in again from configured credentials as needed. Non-Proton WireGuard providers select from `providers.wireguard` catalogs, which may be operator-supplied or fetched from a public provider source, and keep local key material in SQLite. PSO then deploys one combined `sing-box` config. In continuous mode, PSO runs independent endpoint loops for health checks and certificate rotation or server reselection, plus a Proton topology loop when Proton endpoints are present. Endpoint changes are coalesced before rendering, so several updates produce one validated config replacement and one SIGHUP.
+On startup, `run` reads every provider-tagged WireGuard endpoint in the template. Proton endpoints bind to named accounts declared in `auth.proton.accounts`; each account refreshes its stored Proton auth session from SQLite or logs in again from configured credentials as needed. Non-Proton WireGuard providers select from `providers.wireguard` catalogs, which may be operator-supplied or fetched from a public provider source, and keep local key material in SQLite. PSO then deploys one combined `sing-box` config. In continuous mode, PSO runs independent endpoint loops for health checks and certificate expiry extension or server reselection, plus a Proton topology loop when Proton endpoints are present. Endpoint changes are coalesced before rendering, so several updates produce one validated config replacement and one SIGHUP.
 
 Set `run.session_keepalive_interval_secs` to control the optional Proton `/auth/v4/sessions` keepalive loop. Set it to `0` to disable the background polling task.
 
@@ -51,7 +51,7 @@ When a stored Proton refresh token fails during `run`, PSO falls back to a full 
 
 Proton account usage is intentionally explicit: one active Proton WireGuard endpoint should map to one configured Proton account. If you want several simultaneous Proton exits in different countries, provision several Proton accounts and bind each endpoint to a distinct account in the template.
 
-Certificate and key state is stored per endpoint in `pso.sqlite3`. PSO requests a persistent `/vpn/v1/certificate` before Proton's refresh timestamp, retries temporary failures, rotates local key material after repeated failures, and records the full process in SQLite. It also exposes the browser-style `/vpn/v1/certificate/all?Mode=persistent&Offset=0&Limit=51` inspection path through the Proton API client. If health reports `Dead` or `Leaking`, the affected endpoint immediately attempts a certificate refresh and triggers a coalesced redeploy.
+Certificate and key state is stored per endpoint in `pso.sqlite3`. PSO requests a persistent `/vpn/v1/certificate` before Proton's refresh timestamp, extends expiry when a stored profile identifier is available, retries temporary failures, rotates local key material after repeated failures, and records the full process in SQLite. It also exposes the browser-style `/vpn/v1/certificate/all?Mode=persistent&Offset=0&Limit=51` inspection path through the Proton API client. If health reports `Dead` or `Leaking`, the affected endpoint immediately attempts certificate expiry extension and triggers a coalesced redeploy.
 
 Use the grouped subcommands for setup and troubleshooting:
 
@@ -154,11 +154,11 @@ Human-readable Proton tier filters are supported: `Free`, `Basic`, `Plus`, and `
 
 Remove `--dry-run` to validate with `sing-box check`. Add `--active-config /path/to/config.json --singbox-pid <pid>` to atomically replace the active config and send SIGHUP.
 
-## Certificate Refresh
+## Certificate Expiry Extension
 
-The production path for certificate refresh is `pso run`, which coalesces endpoint updates before rendering and deployment. The `control-plane` command remains a manual Proton single-endpoint troubleshooting loop.
+The production path for certificate expiry extension is `pso run`, which coalesces endpoint updates before rendering and deployment. The `control-plane` command remains a manual Proton single-endpoint troubleshooting loop.
 
-Run the manual single-endpoint certificate refresh loop:
+Run the manual single-endpoint certificate extension loop:
 
 ```bash
 cargo run -- control-plane \
@@ -175,7 +175,7 @@ With `control_plane` configured in `pso.config.json`, pass only the account sele
 cargo run -- --config pso.config.json control-plane
 ```
 
-If `--singbox-pid` is omitted, PSO first tries to match the configured `--singbox-bin` or `control_plane.singbox_bin` executable path to a running process. This is the preferred mode when a host has more than one `sing-box` binary. Name-based lookup is only a fallback when the executable path cannot be resolved. On every successful certificate response, the manual loop writes the generated WireGuard endpoint atomically and sends SIGHUP. On refresh failure, it schedules the next attempt at the midpoint between now and certificate expiration, with a 30 second minimum delay and a four-attempt limit before rotating local key material.
+If `--singbox-pid` is omitted, PSO first tries to match the configured `--singbox-bin` or `control_plane.singbox_bin` executable path to a running process. This is the preferred mode when a host has more than one `sing-box` binary. Name-based lookup is only a fallback when the executable path cannot be resolved. On every successful certificate response, the manual loop writes the generated WireGuard endpoint atomically and sends SIGHUP. On extension failure, it schedules the next attempt at the midpoint between now and certificate expiration, with a 30 second minimum delay and a four-attempt limit before rotating local key material.
 
 ## Health Probes
 
@@ -206,7 +206,7 @@ pso --state-dir /var/lib/pso state events --limit 100
 pso --state-dir /var/lib/pso state health --limit 100 --json
 ```
 
-`state accounts` shows known Proton account keys, usernames, and whether a stored Proton session exists. `state certs` shows Proton certificate metadata, selected server, endpoint address, assigned tunnel IP, refresh/expiration times, and failure count without printing private keys. `state wireguard` shows provider-agnostic WireGuard endpoint state for Proton and static providers without printing private keys. `state events` shows runtime events such as session updates, refresh-failure fallback re-logins, and health-triggered certificate refresh outcomes. `state health` shows probe history with raw IP, returned IP, status, and reason.
+`state accounts` shows known Proton account keys, usernames, and whether a stored Proton session exists. `state certs` shows Proton certificate metadata, stored profile identifier, selected server, endpoint address, assigned tunnel IP, refresh/expiration times, and failure count without printing private keys. `state wireguard` shows provider-agnostic WireGuard endpoint state for Proton and static providers without printing private keys. `state events` shows runtime events such as session updates, refresh-failure fallback re-logins, and health-triggered certificate extension outcomes. `state health` shows probe history with raw IP, returned IP, status, and reason.
 
 ## Containers
 
