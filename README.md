@@ -108,6 +108,8 @@ When Proton requires human verification, PSO prints the challenge details return
 2. Complete the CAPTCHA in the browser.
 3. Copy the resolved verification token Proton shows after the challenge and paste it into the PSO prompt.
 
+If you want to inspect the browser result yourself, open the page's DevTools console before solving the challenge and enter `postMessage = console.log`. After the CAPTCHA succeeds, the browser console prints a message shaped like `{"type":"HUMAN_VERIFICATION_SUCCESS","payload":{"token":"...","type":"captcha"}}`. Copy the value of `payload.token` and paste it into PSO or pass it with `--human-verification-token`.
+
 The `verify.proton.me` URL in the error is only the challenge handle; it is not the resolved token. PSO still needs the separate verification token that Proton returns after the CAPTCHA is completed. The `--human-verification-token` flag accepts that resolved token for both `auth login` and `debug auth login`, and it also reads from `PSO_PROTON_HUMAN_VERIFICATION_TOKEN` for headless runs.
 
 Refresh an existing stored Proton session without replaying the password flow:
