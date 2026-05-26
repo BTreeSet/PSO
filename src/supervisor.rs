@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,7 +15,7 @@ use crate::api::{
     ProtonApiClient,
 };
 use crate::config::{AppConfig, RenderConfig, RuntimeContext, TopologyConfig, read_json};
-use crate::crypto::{KeyMaterial, generate_key_material};
+use crate::crypto::generate_key_material;
 use crate::filter::{ServerFilter, select_target};
 use crate::health::{HealthMonitor, HealthStatus, ProbeResult};
 use crate::model::{LogicalServer, PhysicalServer, ProtonLogicalResponse};
@@ -469,13 +470,25 @@ async fn ensure_static_wireguard_endpoint_state(
         return Ok(false);
     }
 
-    let key_material = current
+    let generated_key_material = current.is_none().then(generate_key_material);
+    let private_key_base64 = generated_key_material
         .as_ref()
-        .map(|state| KeyMaterial {
-            private_key_base64: state.private_key.clone(),
-            public_key_base64: state.public_key.clone(),
+        .map(|material| Cow::Borrowed(material.private_key_base64.as_str()))
+        .or_else(|| {
+            current
+                .as_ref()
+                .map(|state| Cow::Borrowed(state.private_key.as_str()))
         })
-        .unwrap_or_else(generate_key_material);
+        .context("missing WireGuard private key state")?;
+    let public_key_base64 = generated_key_material
+        .as_ref()
+        .map(|material| Cow::Borrowed(material.public_key_base64.as_str()))
+        .or_else(|| {
+            current
+                .as_ref()
+                .map(|state| Cow::Borrowed(state.public_key.as_str()))
+        })
+        .context("missing WireGuard public key state")?;
     store.store_wireguard_endpoint_state(WireGuardEndpointStateUpdate {
         outbound_tag: &spec.tag,
         provider: &resolved.provider,
@@ -485,8 +498,8 @@ async fn ensure_static_wireguard_endpoint_state(
         endpoint: &resolved.endpoint,
         peer_public_key: &resolved.peer_public_key,
         pre_shared_key: resolved.pre_shared_key.as_deref(),
-        private_key: &key_material.private_key_base64,
-        public_key: &key_material.public_key_base64,
+        private_key: &private_key_base64,
+        public_key: &public_key_base64,
         assigned_ips: &resolved.assigned_ips,
         allowed_ips: &resolved.allowed_ips,
         persistent_keepalive_interval: resolved.persistent_keepalive_interval,
@@ -509,7 +522,7 @@ async fn probe_endpoint_once(
         .raw_ip
         .as_deref()
         .context("raw IP baseline was not initialized")?;
-    let monitor = HealthMonitor::new(raw_ip.to_string(), runtime.options.interval)?;
+    let monitor = HealthMonitor::new(raw_ip.to_owned(), runtime.options.interval)?;
     let proxy_url = health_proxy_url.or(runtime.options.proxy_url.as_deref());
     let probe = monitor.probe_once(proxy_url).await;
     StateStore::open(&runtime.context)?.record_health(HealthRecord {
@@ -583,15 +596,29 @@ async fn ensure_certificate(
         .as_ref()
         .map(|state| state.consecutive_failures >= MAX_CERT_FAILURES_BEFORE_KEY_ROTATION)
         .unwrap_or(true);
-    let key_material = if rotate_key {
-        generate_key_material()
+    let generated_key_material = if rotate_key {
+        Some(generate_key_material())
     } else {
-        let state = current.as_ref().context("missing outbound cert state")?;
-        KeyMaterial {
-            private_key_base64: state.private_key.clone(),
-            public_key_base64: state.public_key.clone(),
-        }
+        None
     };
+    let private_key_base64 = generated_key_material
+        .as_ref()
+        .map(|material| Cow::Borrowed(material.private_key_base64.as_str()))
+        .or_else(|| {
+            current
+                .as_ref()
+                .map(|state| Cow::Borrowed(state.private_key.as_str()))
+        })
+        .context("missing outbound certificate private key state")?;
+    let public_key_base64 = generated_key_material
+        .as_ref()
+        .map(|material| Cow::Borrowed(material.public_key_base64.as_str()))
+        .or_else(|| {
+            current
+                .as_ref()
+                .map(|state| Cow::Borrowed(state.public_key.as_str()))
+        })
+        .context("missing outbound certificate public key state")?;
 
     let api = ProtonApiClient::from_context(&runtime.context)?;
     let should_extend_expiry = current
@@ -599,7 +626,7 @@ async fn ensure_certificate(
         .and_then(|state| state.profile_id.as_deref())
         .is_some();
     let request = CertificateRequest::persistent_wireguard(
-        &key_material.public_key_base64,
+        &*public_key_base64,
         &runtime.context.proton_client.device_name,
         proton_persistent_certificate_features(server)?,
         should_extend_expiry,
@@ -611,9 +638,11 @@ async fn ensure_certificate(
             return Err(error);
         }
     };
-    let current_profile_id = current
-        .as_ref()
-        .and_then(|state| state.profile_id.as_deref());
+    let current_profile_id = certificate.profile_id.as_deref().or_else(|| {
+        current
+            .as_ref()
+            .and_then(|state| state.profile_id.as_deref())
+    });
     let expected_assigned_ip = certificate.assigned_ip.as_deref().or_else(|| {
         current
             .as_ref()
@@ -627,6 +656,7 @@ async fn ensure_certificate(
         &api,
         access_token,
         current_profile_id,
+        Some(&public_key_base64),
         expected_assigned_ip,
         expected_endpoint,
     )
@@ -636,19 +666,22 @@ async fn ensure_certificate(
         spec,
         username,
         server,
-        &key_material,
+        &private_key_base64,
+        &public_key_base64,
         &certificate,
         profile_id.as_deref(),
     )?;
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_certificate(
     store: &StateStore,
     spec: &ProtonEndpointSpec,
     username: &str,
     server: &PhysicalServer,
-    key_material: &KeyMaterial,
+    private_key_base64: &str,
+    public_key_base64: &str,
     certificate: &CertificateResponse,
     profile_id: Option<&str>,
 ) -> Result<()> {
@@ -672,8 +705,8 @@ fn persist_certificate(
         server_name: &server.name,
         endpoint: &endpoint,
         peer_public_key,
-        private_key: &key_material.private_key_base64,
-        public_key: &key_material.public_key_base64,
+        private_key: private_key_base64,
+        public_key: public_key_base64,
         assigned_ip,
         expires_at_ms: certificate.expiration_time_ms()? as i64,
         refresh_at_ms: certificate.refresh_time_ms()? as i64,
@@ -684,6 +717,7 @@ async fn resolve_profile_id_for_extension(
     api: &ProtonApiClient,
     access_token: &ProtonAccessToken,
     current_profile_id: Option<&str>,
+    expected_public_key_base64: Option<&str>,
     expected_assigned_ip: Option<&str>,
     expected_endpoint: Option<&str>,
 ) -> Option<String> {
@@ -702,11 +736,25 @@ async fn resolve_profile_id_for_extension(
     profiles
         .into_iter()
         .find(|profile| {
-            profile.profile_id.is_some()
-                && (expected_assigned_ip
-                    .is_some_and(|assigned_ip| profile.assigned_ip.as_deref() == Some(assigned_ip))
-                    || expected_endpoint
-                        .is_some_and(|endpoint| profile.endpoint.as_deref() == Some(endpoint)))
+            if profile.profile_id.is_none() {
+                return false;
+            }
+
+            let matches_public_key = expected_public_key_base64
+                .is_some_and(|public_key| profile.matches_client_public_key(public_key));
+            if matches_public_key {
+                return true;
+            }
+
+            match (expected_assigned_ip, expected_endpoint) {
+                (Some(assigned_ip), Some(endpoint)) => {
+                    profile.assigned_ip.as_deref() == Some(assigned_ip)
+                        && profile.endpoint.as_deref() == Some(endpoint)
+                }
+                (Some(assigned_ip), None) => profile.assigned_ip.as_deref() == Some(assigned_ip),
+                (None, Some(endpoint)) => profile.endpoint.as_deref() == Some(endpoint),
+                (None, None) => false,
+            }
         })
         .and_then(|profile| profile.profile_id)
 }

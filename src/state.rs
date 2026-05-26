@@ -270,7 +270,7 @@ impl StateStore {
                 now
             ],
         )?;
-        let assigned_ips = vec![update.assigned_ip.to_string()];
+        let assigned_ips = vec![update.assigned_ip.to_owned()];
         let allowed_ips = default_allowed_ips();
         self.upsert_wireguard_endpoint_state(&WireGuardEndpointStateUpdate {
             outbound_tag: update.outbound_tag,

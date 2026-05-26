@@ -936,6 +936,13 @@ pub struct CertificateResponse {
     pub endpoint: Option<String>,
     #[serde(
         default,
+        alias = "ClientPublicKey",
+        alias = "clientPublicKey",
+        alias = "client_public_key"
+    )]
+    pub client_public_key: Option<String>,
+    #[serde(
+        default,
         alias = "PeerPublicKey",
         alias = "peerPublicKey",
         alias = "peer_public_key"
@@ -963,6 +970,43 @@ impl CertificateResponse {
             })
             .context("Proton certificate response did not include RefreshTime or RefreshTimeMs")
     }
+
+    pub fn matches_client_public_key(&self, expected_raw_base64: &str) -> bool {
+        self.client_public_key
+            .as_deref()
+            .and_then(extract_raw_x25519_public_key_base64)
+            .is_some_and(|profile_key| profile_key == expected_raw_base64)
+    }
+}
+
+fn extract_raw_x25519_public_key_base64(input: &str) -> Option<String> {
+    // SubjectPublicKeyInfo DER prefix for X25519 (OID 1.3.101.112)
+    const X25519_DER_PREFIX: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+
+    let sanitized = input
+        .replace("-----BEGIN PUBLIC KEY-----", "")
+        .replace("-----END PUBLIC KEY-----", "")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    if sanitized.is_empty() {
+        return None;
+    }
+
+    let decoded = general_purpose::STANDARD
+        .decode(sanitized.as_bytes())
+        .ok()?;
+    if decoded.len() == 32 {
+        return Some(general_purpose::STANDARD.encode(decoded));
+    }
+
+    let raw = decoded.strip_prefix(&X25519_DER_PREFIX)?;
+    if raw.len() != 32 {
+        return None;
+    }
+    Some(general_purpose::STANDARD.encode(raw))
 }
 
 #[cfg(test)]
@@ -1074,6 +1118,29 @@ mod tests {
         }]))
         .unwrap();
         assert_eq!(bare.into_certificates().len(), 1);
+    }
+
+    #[test]
+    fn matches_client_public_key_from_pem_profile_shape() {
+        // A PEM-wrapped key that matches the raw base64 form from the HAR extension request.
+        // The \r\n in Rust string literal → actual CR+LF chars → is_whitespace() strips them.
+        let certificate: CertificateResponse = serde_json::from_value(json!({
+            "Certificate": "dummy",
+            "ExpirationTime": 1,
+            "RefreshTime": 1,
+            "ClientPublicKey": "-----BEGIN PUBLIC KEY-----\r\nMCowBQYDK2VwAyEAgTaZvmRLXpjg8ajCWICHrp6AbeC/o/pDco1LN5tiDkk=\r\n-----END PUBLIC KEY-----"
+        }))
+        .unwrap();
+
+        assert!(
+            certificate.client_public_key.is_some(),
+            "client_public_key should be deserialized"
+        );
+        assert!(
+            certificate.matches_client_public_key("gTaZvmRLXpjg8ajCWICHrp6AbeC/o/pDco1LN5tiDkk="),
+            "client_public_key was: {:?}",
+            certificate.client_public_key
+        );
     }
 
     #[test]
