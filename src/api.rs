@@ -666,18 +666,43 @@ pub struct LoginTwoFactorBody {
     pub two_factor_code: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "AuthTokensWire")]
 pub struct AuthTokens {
-    #[serde(alias = "AccessToken", alias = "access_token")]
     pub access_token: String,
-    #[serde(alias = "RefreshToken", alias = "refresh_token")]
     pub refresh_token: String,
-    #[serde(alias = "Uid", alias = "UID", alias = "uid", default)]
     pub uid: Option<String>,
-    #[serde(alias = "TokenType", alias = "token_type", default)]
     pub token_type: Option<String>,
-    #[serde(alias = "ExpiresIn", alias = "expires_in", default)]
     pub expires_in: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+struct AuthTokensWire {
+    #[serde(alias = "access_token")]
+    access_token: String,
+    #[serde(alias = "refresh_token")]
+    refresh_token: String,
+    #[serde(default, alias = "UID", alias = "Uid")]
+    uid_pascal: Option<String>,
+    #[serde(default, alias = "uid")]
+    uid_lower: Option<String>,
+    #[serde(default, alias = "TokenType", alias = "token_type")]
+    token_type: Option<String>,
+    #[serde(default, alias = "ExpiresIn", alias = "expires_in")]
+    expires_in: Option<u64>,
+}
+
+impl From<AuthTokensWire> for AuthTokens {
+    fn from(value: AuthTokensWire) -> Self {
+        Self {
+            access_token: value.access_token,
+            refresh_token: value.refresh_token,
+            uid: value.uid_lower.or(value.uid_pascal),
+            token_type: value.token_type,
+            expires_in: value.expires_in,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -1407,5 +1432,23 @@ mod tests {
 
         assert!(response.requires_two_factor());
         assert!(response.supports_totp());
+    }
+
+    #[test]
+    fn deserializes_auth_response_with_duplicate_uid_aliases() {
+        let response: AuthResponse = serde_json::from_str(
+            r#"{
+                "UID": "uid-from-uppercase",
+                "uid": "uid-from-lowercase",
+                "AccessToken": "access-token",
+                "RefreshToken": "refresh-token",
+                "ServerProof": "server-proof"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.tokens.uid.as_deref(), Some("uid-from-lowercase"));
+        assert_eq!(response.tokens.access_token, "access-token");
+        assert_eq!(response.tokens.refresh_token, "refresh-token");
     }
 }
