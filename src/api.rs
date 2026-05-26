@@ -1,9 +1,10 @@
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose};
 use reqwest::{
-    Client, RequestBuilder, Response, StatusCode,
+    Client, Request, RequestBuilder, Response, StatusCode,
     header::{HeaderMap, HeaderValue},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -507,15 +508,38 @@ where
 {
     let mut last_error = None;
     for attempt in 0..3 {
-        match build().send().await {
+        let request = build();
+        if debug_http {
+            match request.try_clone().and_then(|builder| builder.build().ok()) {
+                Some(preview) => debug_request_attempt(attempt + 1, 3, &preview),
+                None => eprintln!(
+                    "[pso-debug] --> request {}/3: unable to preview request body",
+                    attempt + 1
+                ),
+            }
+        }
+
+        match request.send().await {
             Ok(response) if has_human_verification(&response) => {
                 return decode_response(response, debug_http).await;
             }
             Ok(response) if is_retryable(response.status()) && attempt < 2 => {
+                if debug_http {
+                    eprintln!(
+                        "[pso-debug] <-- retryable response; retrying request after {} ms",
+                        250 * (attempt + 1) as u64
+                    );
+                }
                 sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
             }
             Ok(response) => return decode_response(response, debug_http).await,
             Err(error) if attempt < 2 => {
+                if debug_http {
+                    eprintln!(
+                        "[pso-debug] <-- transport error; retrying request after {} ms: {error:#}",
+                        250 * (attempt + 1) as u64
+                    );
+                }
                 last_error = Some(error);
                 sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
             }
@@ -536,8 +560,11 @@ fn is_retryable(status: StatusCode) -> bool {
 }
 
 fn has_human_verification(response: &Response) -> bool {
-    matches!(response.status().as_u16(), 422 | 429)
-        && response.headers().contains_key("X-PM-Human-Verification")
+    has_human_verification_status(response.status(), response.headers())
+}
+
+fn has_human_verification_status(status: StatusCode, headers: &HeaderMap) -> bool {
+    matches!(status.as_u16(), 422 | 429) && headers.contains_key("X-PM-Human-Verification")
 }
 
 async fn decode_response<T: serde::de::DeserializeOwned>(
@@ -547,6 +574,46 @@ async fn decode_response<T: serde::de::DeserializeOwned>(
     let status = response.status();
     let url = response.url().clone();
 
+    if debug_http {
+        let headers = response.headers().clone();
+        let body = response
+            .bytes()
+            .await
+            .context("failed to read Proton API response body")?;
+        let body_text = body_bytes_to_text(body.as_ref());
+        debug_response_attempt(status, &url, &headers, &body_text);
+
+        if has_human_verification_status(status, &headers) {
+            let challenge = headers
+                .get("X-PM-Human-Verification")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("challenge")
+                .to_string();
+            return Err(HumanVerificationChallenge::from_response(
+                body.as_ref(),
+                &challenge,
+                Some(format!(
+                    "status={status}; url={url}; headers={}",
+                    format_headers(&headers)
+                )),
+            )
+            .into());
+        }
+
+        if !status.is_success() {
+            bail!(
+                "Proton API request failed: status={} url={} headers={} body={}",
+                status,
+                url,
+                format_headers(&headers),
+                body_text,
+            );
+        }
+
+        return serde_json::from_slice::<T>(body.as_ref())
+            .context("failed to decode Proton API response");
+    }
+
     if has_human_verification(&response) {
         let challenge = response
             .headers()
@@ -554,29 +621,9 @@ async fn decode_response<T: serde::de::DeserializeOwned>(
             .and_then(|value| value.to_str().ok())
             .unwrap_or("challenge")
             .to_string();
-        let headers = debug_response_headers(response.headers());
         let body = response.text().await.unwrap_or_default();
-        let debug_details = if debug_http {
-            Some(format!(
-                "status={status}; url={url}; headers={headers}; body={body}"
-            ))
-        } else {
-            None
-        };
         return Err(
-            HumanVerificationChallenge::from_response(&body, &challenge, debug_details).into(),
-        );
-    }
-
-    if debug_http && !status.is_success() {
-        let headers = debug_response_headers(response.headers());
-        let body = response.text().await.unwrap_or_default();
-        bail!(
-            "Proton API request failed: status={} url={} headers={} body={}",
-            status,
-            url,
-            headers,
-            body,
+            HumanVerificationChallenge::from_response(body.as_bytes(), &challenge, None).into(),
         );
     }
 
@@ -588,20 +635,62 @@ async fn decode_response<T: serde::de::DeserializeOwned>(
         .context("failed to decode Proton API response")
 }
 
-fn debug_response_headers(headers: &HeaderMap) -> String {
-    let mut parts = Vec::new();
-    for key in [
-        "content-type",
-        "access",
-        "retry-after",
-        "x-request-id",
-        "x-pm-human-verification",
-    ] {
-        if let Some(value) = headers.get(key)
-            && let Ok(text) = value.to_str()
-        {
-            parts.push(format!("{key}: {text}"));
+fn debug_request_attempt(attempt: usize, total_attempts: usize, request: &Request) {
+    let mut output = String::new();
+    let _ = writeln!(output, "[pso-debug] --> request {attempt}/{total_attempts}");
+    let _ = writeln!(
+        output,
+        "[pso-debug] --> {} {}",
+        request.method(),
+        request.url()
+    );
+    let _ = writeln!(output, "[pso-debug] --> headers:");
+    for (name, value) in request.headers() {
+        let _ = writeln!(
+            output,
+            "[pso-debug]     {}: {}",
+            name,
+            header_value_to_text(value)
+        );
+    }
+
+    match request.body().and_then(|body| body.as_bytes()) {
+        Some(body) if !body.is_empty() => {
+            let _ = writeln!(output, "[pso-debug] --> body:");
+            let _ = writeln!(output, "{}", body_bytes_to_text(body));
         }
+        Some(_) => {
+            let _ = writeln!(output, "[pso-debug] --> body: <empty>");
+        }
+        None => {
+            let _ = writeln!(output, "[pso-debug] --> body: <streaming or unavailable>");
+        }
+    }
+
+    eprint!("{output}");
+}
+
+fn debug_response_attempt(status: StatusCode, url: &reqwest::Url, headers: &HeaderMap, body: &str) {
+    let mut output = String::new();
+    let _ = writeln!(output, "[pso-debug] <-- response: {status} {url}");
+    let _ = writeln!(output, "[pso-debug] <-- headers:");
+    for (name, value) in headers {
+        let _ = writeln!(
+            output,
+            "[pso-debug]     {}: {}",
+            name,
+            header_value_to_text(value)
+        );
+    }
+    let _ = writeln!(output, "[pso-debug] <-- body:");
+    let _ = writeln!(output, "{body}");
+    eprint!("{output}");
+}
+
+fn format_headers(headers: &HeaderMap) -> String {
+    let mut parts = Vec::new();
+    for (name, value) in headers {
+        parts.push(format!("{name}: {}", header_value_to_text(value)));
     }
 
     if parts.is_empty() {
@@ -609,6 +698,19 @@ fn debug_response_headers(headers: &HeaderMap) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+fn header_value_to_text(value: &HeaderValue) -> String {
+    value
+        .to_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|_| format!("{:?}", value.as_bytes()))
+}
+
+fn body_bytes_to_text(bytes: &[u8]) -> String {
+    std::str::from_utf8(bytes)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|_| format!("{:?}", bytes))
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -798,8 +900,8 @@ pub struct HumanVerificationChallenge {
 }
 
 impl HumanVerificationChallenge {
-    fn from_response(body: &str, challenge_token: &str, debug_details: Option<String>) -> Self {
-        let parsed = serde_json::from_str::<HumanVerificationResponseBody>(body).ok();
+    fn from_response(body: &[u8], challenge_token: &str, debug_details: Option<String>) -> Self {
+        let parsed = serde_json::from_slice::<HumanVerificationResponseBody>(body).ok();
         let details = parsed
             .as_ref()
             .and_then(|response| response.details.as_ref());
@@ -1208,7 +1310,7 @@ mod tests {
     #[test]
     fn parses_human_verification_challenge_shape() {
         let challenge = HumanVerificationChallenge::from_response(
-            r#"{"Code":9001,"Error":"For security reasons, please complete CAPTCHA.","Details":{"HumanVerificationToken":"E-Psio7Nfo8DkBIuQu9niLA3","HumanVerificationMethods":["captcha"],"Title":"Human Verification","Description":"","WebUrl":"https://verify.proton.me/?methods=captcha&token=E-Psio7Nfo8DkBIuQu9niLA3","ExpiresAt":1779826106}}"#,
+            br#"{"Code":9001,"Error":"For security reasons, please complete CAPTCHA.","Details":{"HumanVerificationToken":"E-Psio7Nfo8DkBIuQu9niLA3","HumanVerificationMethods":["captcha"],"Title":"Human Verification","Description":"","WebUrl":"https://verify.proton.me/?methods=captcha&token=E-Psio7Nfo8DkBIuQu9niLA3","ExpiresAt":1779826106}}"#,
             "fallback-token",
             None,
         );
