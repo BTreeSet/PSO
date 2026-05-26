@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -90,15 +89,15 @@ impl EndpointSpec {
 
 #[derive(Clone)]
 pub(crate) struct SupervisorRuntime {
-    pub(crate) context: RuntimeContext,
-    pub(crate) render: RenderConfig,
-    pub(crate) topology: TopologyConfig,
-    pub(crate) providers: ProvidersConfig,
-    pub(crate) proton_accounts: ProtonAccountRegistry,
-    pub(crate) template: Value,
-    pub(crate) specs: Vec<EndpointSpec>,
-    pub(crate) sessions: BTreeMap<String, UserSession>,
-    pub(crate) options: SupervisorOptions,
+    pub(crate) context: Arc<RuntimeContext>,
+    pub(crate) render: Arc<RenderConfig>,
+    pub(crate) topology: Arc<TopologyConfig>,
+    pub(crate) providers: Arc<ProvidersConfig>,
+    pub(crate) proton_accounts: Arc<ProtonAccountRegistry>,
+    pub(crate) template: Arc<Value>,
+    pub(crate) specs: Arc<Vec<EndpointSpec>>,
+    pub(crate) sessions: Arc<BTreeMap<String, UserSession>>,
+    pub(crate) options: Arc<SupervisorOptions>,
     pub(crate) token_states: Arc<BTreeMap<String, Arc<Mutex<CachedAccessToken>>>>,
 }
 
@@ -152,15 +151,15 @@ pub async fn run_supervisor(
         ..options
     };
     let runtime = SupervisorRuntime {
-        context: context.clone(),
-        render: config.render.clone(),
-        topology: config.topology.clone(),
-        providers: config.providers.clone(),
-        proton_accounts,
-        template,
-        specs,
-        sessions,
-        options,
+        context: Arc::new(context.clone()),
+        render: Arc::new(config.render.clone()),
+        topology: Arc::new(config.topology.clone()),
+        providers: Arc::new(config.providers.clone()),
+        proton_accounts: Arc::new(proton_accounts),
+        template: Arc::new(template),
+        specs: Arc::new(specs),
+        sessions: Arc::new(sessions),
+        options: Arc::new(options),
         token_states: Arc::new(token_states),
     };
 
@@ -207,7 +206,7 @@ async fn run_continuous(runtime: SupervisorRuntime) -> Result<()> {
 
 async fn supervise_once(runtime: &SupervisorRuntime) -> Result<()> {
     let mut changed = false;
-    for spec in &runtime.specs {
+    for spec in runtime.specs.iter() {
         changed |= process_endpoint(runtime, spec, false).await?;
     }
     if changed || !rendered_output_path(&runtime.context, &runtime.render).exists() {
@@ -471,23 +470,15 @@ async fn ensure_static_wireguard_endpoint_state(
     }
 
     let generated_key_material = current.is_none().then(generate_key_material);
-    let private_key_base64 = generated_key_material
+    let private_key_base64: &str = generated_key_material
         .as_ref()
-        .map(|material| Cow::Borrowed(material.private_key_base64.as_str()))
-        .or_else(|| {
-            current
-                .as_ref()
-                .map(|state| Cow::Borrowed(state.private_key.as_str()))
-        })
+        .map(|material| material.private_key_base64.as_str())
+        .or_else(|| current.as_ref().map(|state| state.private_key.as_str()))
         .context("missing WireGuard private key state")?;
-    let public_key_base64 = generated_key_material
+    let public_key_base64: &str = generated_key_material
         .as_ref()
-        .map(|material| Cow::Borrowed(material.public_key_base64.as_str()))
-        .or_else(|| {
-            current
-                .as_ref()
-                .map(|state| Cow::Borrowed(state.public_key.as_str()))
-        })
+        .map(|material| material.public_key_base64.as_str())
+        .or_else(|| current.as_ref().map(|state| state.public_key.as_str()))
         .context("missing WireGuard public key state")?;
     store.store_wireguard_endpoint_state(WireGuardEndpointStateUpdate {
         outbound_tag: &spec.tag,
@@ -498,8 +489,8 @@ async fn ensure_static_wireguard_endpoint_state(
         endpoint: &resolved.endpoint,
         peer_public_key: &resolved.peer_public_key,
         pre_shared_key: resolved.pre_shared_key.as_deref(),
-        private_key: &private_key_base64,
-        public_key: &public_key_base64,
+        private_key: private_key_base64,
+        public_key: public_key_base64,
         assigned_ips: &resolved.assigned_ips,
         allowed_ips: &resolved.allowed_ips,
         persistent_keepalive_interval: resolved.persistent_keepalive_interval,
@@ -601,23 +592,15 @@ async fn ensure_certificate(
     } else {
         None
     };
-    let private_key_base64 = generated_key_material
+    let private_key_base64: &str = generated_key_material
         .as_ref()
-        .map(|material| Cow::Borrowed(material.private_key_base64.as_str()))
-        .or_else(|| {
-            current
-                .as_ref()
-                .map(|state| Cow::Borrowed(state.private_key.as_str()))
-        })
+        .map(|material| material.private_key_base64.as_str())
+        .or_else(|| current.as_ref().map(|state| state.private_key.as_str()))
         .context("missing outbound certificate private key state")?;
-    let public_key_base64 = generated_key_material
+    let public_key_base64: &str = generated_key_material
         .as_ref()
-        .map(|material| Cow::Borrowed(material.public_key_base64.as_str()))
-        .or_else(|| {
-            current
-                .as_ref()
-                .map(|state| Cow::Borrowed(state.public_key.as_str()))
-        })
+        .map(|material| material.public_key_base64.as_str())
+        .or_else(|| current.as_ref().map(|state| state.public_key.as_str()))
         .context("missing outbound certificate public key state")?;
 
     let api = ProtonApiClient::from_context(&runtime.context)?;
@@ -626,7 +609,7 @@ async fn ensure_certificate(
         .and_then(|state| state.profile_id.as_deref())
         .is_some();
     let request = CertificateRequest::persistent_wireguard(
-        &*public_key_base64,
+        public_key_base64,
         &runtime.context.proton_client.device_name,
         proton_persistent_certificate_features(server)?,
         should_extend_expiry,
@@ -656,7 +639,7 @@ async fn ensure_certificate(
         &api,
         access_token,
         current_profile_id,
-        Some(&public_key_base64),
+        Some(public_key_base64),
         expected_assigned_ip,
         expected_endpoint,
     )
@@ -666,8 +649,8 @@ async fn ensure_certificate(
         spec,
         username,
         server,
-        &private_key_base64,
-        &public_key_base64,
+        private_key_base64,
+        public_key_base64,
         &certificate,
         profile_id.as_deref(),
     )?;
