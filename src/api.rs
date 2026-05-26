@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose};
 use reqwest::{
     Client, RequestBuilder, Response, StatusCode,
     header::{HeaderMap, HeaderValue},
@@ -13,6 +14,20 @@ use crate::config::{ProtonClientProfile, RuntimeContext};
 use crate::model::{LogicalServer, ProtonLogicalResponse};
 
 const PROTON_LOGICALS_PROTOCOLS: &str = "WireGuardUDP,WireGuardTCP,WireGuardTLS";
+const BROWSER_ACCEPT_LANGUAGE: &str = "en-CA,en;q=0.9";
+const BROWSER_DNT: &str = "1";
+const BROWSER_ORIGIN: &str = "https://account.protonvpn.com";
+const BROWSER_PRIORITY: &str = "u=1, i";
+const BROWSER_SEC_CH_UA: &str =
+    "\"Chromium\";v=\"148\", \"Google Chrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"";
+const BROWSER_SEC_CH_UA_MOBILE: &str = "?0";
+const BROWSER_SEC_CH_UA_PLATFORM: &str = "\"macOS\"";
+const BROWSER_SEC_FETCH_DEST: &str = "empty";
+const BROWSER_SEC_FETCH_MODE: &str = "cors";
+const BROWSER_SEC_FETCH_SITE: &str = "same-origin";
+const BROWSER_SEC_GPC: &str = "1";
+const BROWSER_LOGIN_REFERER: &str = "https://account.protonvpn.com/login";
+const BROWSER_DOWNLOADS_REFERER: &str = "https://account.protonvpn.com/downloads";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtonAccessToken {
@@ -72,7 +87,12 @@ impl ProtonApiClient {
         profile: &ProtonClientProfile,
         debug_http: bool,
     ) -> Result<Self> {
-        let mut default_headers = HeaderMap::new();
+        let mut default_headers = browser_default_headers();
+        default_headers.insert(
+            "accept",
+            HeaderValue::from_static("application/vnd.protonmail.v1+json"),
+        );
+        default_headers.insert("x-pm-locale", HeaderValue::from_static("en_US"));
         default_headers.insert(
             "x-pm-appversion",
             HeaderValue::from_str(&profile.app_version_header)
@@ -102,13 +122,93 @@ impl ProtonApiClient {
         let url = self.api_url("vpn/v1/certificate");
         send_json_with_retry(
             || {
-                self.with_access_token_auth(self.client.post(&url), access)
-                    .json(request)
+                with_browser_origin_headers(
+                    self.with_access_token_auth(self.client.post(&url), access),
+                    BROWSER_DOWNLOADS_REFERER,
+                )
+                .json(request)
             },
             self.debug_http,
         )
         .await
         .context("Proton certificate request failed")
+    }
+
+    pub async fn list_sessions(&self, access: &ProtonAccessToken) -> Result<serde_json::Value> {
+        let url = self.api_url("auth/v4/sessions");
+        send_json_with_retry(
+            || {
+                with_browser_referer_headers(
+                    self.with_access_token_auth(self.client.get(&url), access),
+                    BROWSER_LOGIN_REFERER,
+                )
+            },
+            self.debug_http,
+        )
+        .await
+        .context("Proton sessions listing request failed")
+    }
+
+    pub async fn set_session_local_key(
+        &self,
+        access: &ProtonAccessToken,
+        key: impl Into<String>,
+    ) -> Result<ApiCodeResponse> {
+        let url = self.api_url("auth/v4/sessions/local/key");
+        let request = SessionLocalKeyBody { key: key.into() };
+        send_json_with_retry(
+            || {
+                with_browser_origin_headers(
+                    self.with_access_token_auth(self.client.put(&url), access),
+                    BROWSER_LOGIN_REFERER,
+                )
+                .json(&request)
+            },
+            self.debug_http,
+        )
+        .await
+        .context("Proton session local key request failed")
+    }
+
+    pub async fn set_session_payload(
+        &self,
+        access: &ProtonAccessToken,
+        payload: serde_json::Value,
+    ) -> Result<ApiCodeResponse> {
+        let url = self.api_url("auth/v4/sessions/payload");
+        let request = SessionPayloadBody { payload };
+        send_json_with_retry(
+            || {
+                with_browser_origin_headers(
+                    self.with_access_token_auth(self.client.post(&url), access),
+                    BROWSER_LOGIN_REFERER,
+                )
+                .json(&request)
+            },
+            self.debug_http,
+        )
+        .await
+        .context("Proton session payload request failed")
+    }
+
+    pub async fn list_persistent_certificates(
+        &self,
+        access: &ProtonAccessToken,
+    ) -> Result<Vec<CertificateResponse>> {
+        let url = self.api_url("vpn/v1/certificate/all");
+        Ok(send_json_with_retry::<CertificateListResponse, _>(
+            || {
+                with_browser_referer_headers(
+                    self.with_access_token_auth(self.client.get(&url), access),
+                    BROWSER_DOWNLOADS_REFERER,
+                )
+                .query(&[("Mode", "persistent"), ("Offset", "0"), ("Limit", "51")])
+            },
+            self.debug_http,
+        )
+        .await
+        .context("Proton certificate list request failed")?
+        .into_certificates())
     }
 
     pub async fn get_logicals(
@@ -146,8 +246,7 @@ impl ProtonApiClient {
         let url = self.api_url("auth/v4/sessions");
         send_json_with_retry(
             || {
-                self.client
-                    .post(&url)
+                with_browser_origin_headers(self.client.post(&url), BROWSER_LOGIN_REFERER)
                     .header("x-enforce-unauthsession", "true")
             },
             self.debug_http,
@@ -165,13 +264,19 @@ impl ProtonApiClient {
         let url = self.api_url("core/v4/auth/info");
         let request = LoginInfoBody {
             username: Some(username.to_string()),
-            intent: "Proton".into(),
+            intent: "Auto".into(),
         };
         send_json_with_retry(
             || {
-                let mut builder = self
-                    .with_auth_headers(self.client.post(&url), &session.uid, &session.access_token)
-                    .json(&request);
+                let mut builder = with_browser_origin_headers(
+                    self.with_auth_headers(
+                        self.client.post(&url),
+                        &session.uid,
+                        &session.access_token,
+                    ),
+                    BROWSER_LOGIN_REFERER,
+                )
+                .json(&request);
                 if let Some(token) = human_verification_token {
                     builder = builder.header("X-PM-Human-Verification", token);
                 }
@@ -203,9 +308,15 @@ impl ProtonApiClient {
         };
         send_json_with_retry(
             || {
-                let mut builder = self
-                    .with_auth_headers(self.client.post(&url), &session.uid, &session.access_token)
-                    .json(&request);
+                let mut builder = with_browser_origin_headers(
+                    self.with_auth_headers(
+                        self.client.post(&url),
+                        &session.uid,
+                        &session.access_token,
+                    ),
+                    BROWSER_LOGIN_REFERER,
+                )
+                .json(&request);
                 if let Some(token) = human_verification_token {
                     builder = builder.header("X-PM-Human-Verification", token);
                 }
@@ -232,8 +343,11 @@ impl ProtonApiClient {
         };
         let _response: ApiCodeResponse = send_json_with_retry(
             || {
-                self.with_auth_headers(self.client.post(&url), uid, &tokens.access_token)
-                    .json(&request)
+                with_browser_origin_headers(
+                    self.with_auth_headers(self.client.post(&url), uid, &tokens.access_token),
+                    BROWSER_LOGIN_REFERER,
+                )
+                .json(&request)
             },
             self.debug_http,
         )
@@ -327,6 +441,49 @@ fn normalize_api_base_url(base_url: impl Into<String>) -> String {
     }
 
     value
+}
+
+fn browser_default_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "accept-language",
+        HeaderValue::from_static(BROWSER_ACCEPT_LANGUAGE),
+    );
+    headers.insert("dnt", HeaderValue::from_static(BROWSER_DNT));
+    headers.insert("priority", HeaderValue::from_static(BROWSER_PRIORITY));
+    headers.insert("sec-ch-ua", HeaderValue::from_static(BROWSER_SEC_CH_UA));
+    headers.insert(
+        "sec-ch-ua-mobile",
+        HeaderValue::from_static(BROWSER_SEC_CH_UA_MOBILE),
+    );
+    headers.insert(
+        "sec-ch-ua-platform",
+        HeaderValue::from_static(BROWSER_SEC_CH_UA_PLATFORM),
+    );
+    headers.insert(
+        "sec-fetch-dest",
+        HeaderValue::from_static(BROWSER_SEC_FETCH_DEST),
+    );
+    headers.insert(
+        "sec-fetch-mode",
+        HeaderValue::from_static(BROWSER_SEC_FETCH_MODE),
+    );
+    headers.insert(
+        "sec-fetch-site",
+        HeaderValue::from_static(BROWSER_SEC_FETCH_SITE),
+    );
+    headers.insert("sec-gpc", HeaderValue::from_static(BROWSER_SEC_GPC));
+    headers
+}
+
+fn with_browser_referer_headers(builder: RequestBuilder, referer: &'static str) -> RequestBuilder {
+    builder.header("referer", referer)
+}
+
+fn with_browser_origin_headers(builder: RequestBuilder, referer: &'static str) -> RequestBuilder {
+    builder
+        .header("origin", BROWSER_ORIGIN)
+        .header("referer", referer)
 }
 
 async fn send_json_with_retry<T, F>(mut build: F, debug_http: bool) -> Result<T>
@@ -580,16 +737,21 @@ pub struct RefreshSessionBody {
 pub struct CertificateRequest {
     #[serde(rename = "ClientPublicKey")]
     pub client_public_key: String,
-    #[serde(rename = "ClientPublicKeyMode")]
-    pub client_public_key_mode: String,
     #[serde(rename = "DeviceName")]
     pub device_name: String,
     #[serde(rename = "Mode")]
     pub mode: String,
     #[serde(rename = "Features")]
-    pub features: Vec<String>,
+    pub features: CertificateFeatures,
+    #[serde(
+        rename = "ClientPublicKeyMode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub client_public_key_mode: Option<String>,
     #[serde(rename = "Duration", skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
+    #[serde(rename = "Renew", skip_serializing_if = "Option::is_none")]
+    pub renew: Option<bool>,
 }
 
 impl CertificateRequest {
@@ -599,13 +761,132 @@ impl CertificateRequest {
     ) -> Self {
         Self {
             client_public_key: client_public_key.into(),
-            client_public_key_mode: "EC".into(),
             device_name: device_name.into(),
             mode: "session".into(),
-            features: Vec::new(),
+            features: CertificateFeatures::Empty(Vec::new()),
+            client_public_key_mode: Some("EC".into()),
             duration: None,
+            renew: None,
         }
     }
+
+    pub fn persistent_wireguard(
+        client_public_key: impl Into<String>,
+        device_name: impl Into<String>,
+        features: PersistentCertificateFeatures,
+        renew: bool,
+    ) -> Result<Self> {
+        let client_public_key = client_public_key.into();
+        let client_public_key = if renew {
+            pem_encode_x25519_public_key(&client_public_key)?
+        } else {
+            client_public_key
+        };
+
+        Ok(Self {
+            client_public_key,
+            device_name: device_name.into(),
+            mode: "persistent".into(),
+            features: CertificateFeatures::Persistent(features),
+            client_public_key_mode: None,
+            duration: None,
+            renew: renew.then_some(true),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CertificateFeatures {
+    Empty(Vec<String>),
+    Persistent(PersistentCertificateFeatures),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistentCertificateFeatures {
+    #[serde(rename = "Bouncing")]
+    pub bouncing: String,
+    #[serde(rename = "PortForwarding")]
+    pub port_forwarding: bool,
+    #[serde(rename = "SplitTCP")]
+    pub split_tcp: bool,
+    #[serde(rename = "peerName")]
+    pub peer_name: String,
+    #[serde(rename = "peerIp")]
+    pub peer_ip: String,
+    #[serde(rename = "peerPublicKey")]
+    pub peer_public_key: String,
+    #[serde(rename = "platform")]
+    pub platform: String,
+}
+
+impl PersistentCertificateFeatures {
+    pub fn proton(
+        peer_name: impl Into<String>,
+        peer_ip: impl Into<String>,
+        peer_public_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            bouncing: "0".into(),
+            port_forwarding: false,
+            split_tcp: true,
+            peer_name: peer_name.into(),
+            peer_ip: peer_ip.into(),
+            peer_public_key: peer_public_key.into(),
+            platform: "Android".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SessionLocalKeyBody {
+    pub key: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SessionPayloadBody {
+    pub payload: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CertificateListResponse {
+    Bare(Vec<CertificateResponse>),
+    Wrapped {
+        #[serde(
+            alias = "Certificates",
+            alias = "Certificate",
+            alias = "Items",
+            default
+        )]
+        certificates: Vec<CertificateResponse>,
+    },
+}
+
+impl CertificateListResponse {
+    pub fn into_certificates(self) -> Vec<CertificateResponse> {
+        match self {
+            Self::Bare(certificates) => certificates,
+            Self::Wrapped { certificates } => certificates,
+        }
+    }
+}
+
+fn pem_encode_x25519_public_key(raw_public_key_base64: &str) -> Result<String> {
+    let public_key = general_purpose::STANDARD
+        .decode(raw_public_key_base64)
+        .context("invalid Proton X25519 public key")?;
+    let mut der = Vec::with_capacity(12 + public_key.len());
+    der.extend_from_slice(&[
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x03, 0x21, 0x00,
+    ]);
+    der.extend_from_slice(&public_key);
+    let encoded = general_purpose::STANDARD.encode(der);
+    Ok(format!(
+        "-----BEGIN PUBLIC KEY-----\r\n{encoded}\r\n-----END PUBLIC KEY-----"
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -677,6 +958,29 @@ mod tests {
 
     use super::*;
 
+    const DUMMY_X25519_PUBLIC_KEY_BASE64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const DUMMY_PEER_PUBLIC_KEY: &str = "dumb-peer-public-key";
+    const DUMMY_SESSION_KEY: &str = "dumb-session-key";
+    const DUMMY_ENCRYPTED_PAYLOAD: &str = "dumb-encrypted-payload";
+
+    #[test]
+    fn browser_default_headers_include_chrome_hints() {
+        let headers = browser_default_headers();
+        assert_eq!(headers.get("accept-language").unwrap(), "en-CA,en;q=0.9");
+        assert_eq!(headers.get("dnt").unwrap(), "1");
+        assert_eq!(headers.get("priority").unwrap(), "u=1, i");
+        assert_eq!(
+            headers.get("sec-ch-ua").unwrap(),
+            "\"Chromium\";v=\"148\", \"Google Chrome\";v=\"148\", \"Not/A)Brand\";v=\"99\""
+        );
+        assert_eq!(headers.get("sec-ch-ua-mobile").unwrap(), "?0");
+        assert_eq!(headers.get("sec-ch-ua-platform").unwrap(), "\"macOS\"");
+        assert_eq!(headers.get("sec-fetch-dest").unwrap(), "empty");
+        assert_eq!(headers.get("sec-fetch-mode").unwrap(), "cors");
+        assert_eq!(headers.get("sec-fetch-site").unwrap(), "same-origin");
+        assert_eq!(headers.get("sec-gpc").unwrap(), "1");
+    }
+
     #[test]
     fn serializes_certificate_request_like_proton_client() {
         let request = CertificateRequest::wireguard_session("public-key", "PSO-Rust-Control-Plane");
@@ -686,6 +990,77 @@ mod tests {
         assert_eq!(value["DeviceName"], "PSO-Rust-Control-Plane");
         assert_eq!(value["Mode"], "session");
         assert_eq!(value["Features"], json!([]));
+        assert!(value.get("Renew").is_none());
+    }
+
+    #[test]
+    fn serializes_persistent_certificate_request_like_browser_client() {
+        let request = CertificateRequest::persistent_wireguard(
+            DUMMY_X25519_PUBLIC_KEY_BASE64,
+            "f983fc5f-b834-41ae-97c4-ee49e2c46153",
+            PersistentCertificateFeatures::proton(
+                "DUMMY-FREE#1",
+                "198.51.100.10",
+                DUMMY_PEER_PUBLIC_KEY,
+            ),
+            true,
+        )
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["Mode"], "persistent");
+        assert_eq!(value["DeviceName"], "f983fc5f-b834-41ae-97c4-ee49e2c46153");
+        assert_eq!(value["Renew"], json!(true));
+        assert_eq!(
+            value["ClientPublicKey"],
+            pem_encode_x25519_public_key(DUMMY_X25519_PUBLIC_KEY_BASE64).unwrap()
+        );
+        assert_eq!(value["Features"]["Bouncing"], "0");
+        assert_eq!(value["Features"]["peerName"], "DUMMY-FREE#1");
+        assert_eq!(value["Features"]["peerIp"], "198.51.100.10");
+        assert_eq!(value["Features"]["platform"], "Android");
+    }
+
+    #[test]
+    fn serializes_browser_session_maintenance_bodies_like_proton_client() {
+        let local_key = serde_json::to_value(SessionLocalKeyBody {
+            key: DUMMY_SESSION_KEY.into(),
+        })
+        .unwrap();
+        assert_eq!(local_key["Key"], DUMMY_SESSION_KEY);
+
+        let payload = serde_json::to_value(SessionPayloadBody {
+            payload: json!({
+                ".-77VX-aP0iPqoI": DUMMY_ENCRYPTED_PAYLOAD
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            payload["Payload"][".-77VX-aP0iPqoI"],
+            DUMMY_ENCRYPTED_PAYLOAD
+        );
+    }
+
+    #[test]
+    fn deserializes_certificate_list_response_shapes() {
+        let wrapped: CertificateListResponse = serde_json::from_value(json!({
+            "Certificates": [{
+                "Certificate": "cert-pem",
+                "ExpirationTime": 2,
+                "RefreshTime": 1,
+                "AssignedIP": "10.2.0.2/32"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(wrapped.into_certificates().len(), 1);
+
+        let bare: CertificateListResponse = serde_json::from_value(json!([{
+            "Certificate": "cert-pem",
+            "ExpirationTime": 2,
+            "RefreshTime": 1,
+            "AssignedIP": "10.2.0.2/32"
+        }]))
+        .unwrap();
+        assert_eq!(bare.into_certificates().len(), 1);
     }
 
     #[test]
@@ -708,11 +1083,11 @@ mod tests {
     fn serializes_login_and_session_fork_like_proton_client() {
         let login_info = serde_json::to_value(LoginInfoBody {
             username: Some("alice@example.com".into()),
-            intent: "Proton".into(),
+            intent: "Auto".into(),
         })
         .unwrap();
         assert_eq!(login_info["Username"], "alice@example.com");
-        assert_eq!(login_info["Intent"], "Proton");
+        assert_eq!(login_info["Intent"], "Auto");
 
         let login = serde_json::to_value(LoginBody {
             username: "alice@example.com".into(),

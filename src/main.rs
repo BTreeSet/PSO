@@ -117,6 +117,7 @@ async fn run(context: &RuntimeContext, config: &AppConfig, args: RunArgs) -> Res
             proxy_url: args.proxy_url.or(config.run.proxy_url.clone()),
             once: args.once,
             interval,
+            session_keepalive_interval: None,
         },
     )
     .await
@@ -156,6 +157,7 @@ async fn render(context: &RuntimeContext, config: &AppConfig, args: RenderArgs) 
             proxy_url: render_config.run.proxy_url.clone(),
             once: true,
             interval,
+            session_keepalive_interval: None,
         },
     )
     .await

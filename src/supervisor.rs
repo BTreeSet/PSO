@@ -9,15 +9,18 @@ use tokio::time::sleep;
 use tracing::{error, warn};
 
 use crate::accounts::ProtonAccountRegistry;
-use crate::api::{CertificateRequest, CertificateResponse, ProtonAccessToken, ProtonApiClient};
+use crate::api::{
+    CertificateRequest, CertificateResponse, PersistentCertificateFeatures, ProtonAccessToken,
+    ProtonApiClient,
+};
 use crate::config::{AppConfig, RenderConfig, RuntimeContext, TopologyConfig, read_json};
 use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::filter::{ServerFilter, select_target};
 use crate::health::{HealthMonitor, HealthStatus, ProbeResult};
 use crate::model::{LogicalServer, PhysicalServer, ProtonLogicalResponse};
 use crate::proton::{
-    CachedAccessToken, PROTON_WIREGUARD_KEEPALIVE_INTERVAL, ensure_account_access_token,
-    proton_wireguard_assigned_ips,
+    CachedAccessToken, PROTON_WIREGUARD_ADDRESS_V4, PROTON_WIREGUARD_KEEPALIVE_INTERVAL,
+    ensure_account_access_token, proton_wireguard_assigned_ips,
 };
 use crate::provider::{
     PROTON_PROVIDER, ProvidersConfig, WireGuardEndpointOverrides, WireGuardServerFilter,
@@ -45,6 +48,7 @@ pub struct SupervisorOptions {
     pub proxy_url: Option<String>,
     pub once: bool,
     pub interval: Duration,
+    pub session_keepalive_interval: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,7 +104,7 @@ pub(crate) struct SupervisorRuntime {
 pub async fn run_supervisor(
     context: &RuntimeContext,
     config: &AppConfig,
-    options: SupervisorOptions,
+    mut options: SupervisorOptions,
 ) -> Result<()> {
     config.providers.validate()?;
     config.auth.validate()?;
@@ -136,12 +140,14 @@ pub async fn run_supervisor(
         })
         .collect();
 
-    let raw_ip = match options.raw_ip.clone() {
+    let raw_ip = match options.raw_ip.take() {
         Some(ip) => ip,
         None => HealthMonitor::acquire_baseline().await?,
     };
     let options = SupervisorOptions {
         raw_ip: Some(raw_ip),
+        session_keepalive_interval: (config.run.session_keepalive_interval_secs > 0)
+            .then(|| Duration::from_secs(config.run.session_keepalive_interval_secs)),
         ..options
     };
     let runtime = SupervisorRuntime {
@@ -179,10 +185,18 @@ async fn run_continuous(runtime: SupervisorRuntime) -> Result<()> {
         tokio::spawn(async move { topology_loop(topology_runtime, account, topology_tx).await });
     }
 
-    for spec in runtime.specs.clone() {
+    for spec in runtime.specs.iter().cloned() {
         let outbound_runtime = runtime.clone();
         let outbound_tx = deploy_tx.clone();
         tokio::spawn(async move { outbound_loop(outbound_runtime, spec, outbound_tx).await });
+    }
+    if runtime.options.session_keepalive_interval.is_some() {
+        for account in runtime.sessions.keys().cloned() {
+            let keepalive_runtime = runtime.clone();
+            tokio::spawn(async move {
+                session_keepalive_loop(keepalive_runtime, account).await;
+            });
+        }
     }
     drop(deploy_tx);
 
@@ -238,7 +252,7 @@ async fn outbound_loop(
                 let username = endpoint_username(&runtime, &spec);
                 record_runtime_error(
                     &runtime.context,
-                    username.as_deref(),
+                    username,
                     Some(spec.tag()),
                     "outbound_cycle_failed",
                     &error,
@@ -247,6 +261,37 @@ async fn outbound_loop(
         }
         sleep(runtime.options.interval).await;
     }
+}
+
+async fn session_keepalive_loop(runtime: SupervisorRuntime, account_name: String) {
+    let Some(interval) = runtime.options.session_keepalive_interval else {
+        return;
+    };
+
+    loop {
+        sleep(interval).await;
+        if let Err(error) = keepalive_proton_session(&runtime, &account_name).await {
+            warn!(account = %account_name, %error, "Proton session keepalive failed");
+            let username = runtime
+                .proton_accounts
+                .get(&account_name)
+                .map(|account| account.username.as_str());
+            record_runtime_error(
+                &runtime.context,
+                username,
+                None,
+                "proton_session_keepalive_failed",
+                &error,
+            );
+        }
+    }
+}
+
+async fn keepalive_proton_session(runtime: &SupervisorRuntime, account_name: &str) -> Result<()> {
+    let access_token = access_token_for_account(runtime, account_name).await?;
+    let api = ProtonApiClient::from_context(&runtime.context)?;
+    let _ = api.list_sessions(&access_token).await?;
+    Ok(())
 }
 
 async fn deployment_loop(runtime: SupervisorRuntime, mut deploy_rx: mpsc::Receiver<()>) {
@@ -549,10 +594,12 @@ async fn ensure_certificate(
     };
 
     let api = ProtonApiClient::from_context(&runtime.context)?;
-    let request = CertificateRequest::wireguard_session(
+    let request = CertificateRequest::persistent_wireguard(
         &key_material.public_key_base64,
         &runtime.context.proton_client.device_name,
-    );
+        proton_persistent_certificate_features(server)?,
+        current.is_some(),
+    )?;
     let certificate = match api.get_certificate(access_token, &request).await {
         Ok(certificate) => certificate,
         Err(error) => {
@@ -580,29 +627,63 @@ fn persist_certificate(
     })?;
     let peer_public_key = server
         .public_key
-        .clone()
-        .or(certificate.peer_public_key.clone())
+        .as_deref()
+        .or(certificate.peer_public_key.as_deref())
         .context("Proton certificate and server topology did not include peer public key")?;
-    let assigned_ips = proton_wireguard_assigned_ips();
-    let assigned_ip = assigned_ips
-        .first()
-        .cloned()
-        .context("Proton assigned IP defaults are empty")?;
+    let assigned_ip = PROTON_WIREGUARD_ADDRESS_V4;
     store.store_outbound_certificate_success(OutboundCertificateUpdate {
         outbound_tag: &spec.tag,
         username,
         server_id: &stable_server_id(server),
         server_name: &server.name,
         endpoint: &endpoint,
-        peer_public_key: &peer_public_key,
+        peer_public_key,
         private_key: &key_material.private_key_base64,
         public_key: &key_material.public_key_base64,
-        assigned_ip: &assigned_ip,
+        assigned_ip,
         expires_at_ms: certificate.expiration_time_ms()? as i64,
         refresh_at_ms: certificate.refresh_time_ms()? as i64,
     })
 }
 
+fn proton_persistent_certificate_features(
+    server: &PhysicalServer,
+) -> Result<PersistentCertificateFeatures> {
+    let peer_name = server.name.clone();
+    let peer_ip = proton_persistent_peer_ip(server)?;
+    let peer_public_key = server
+        .public_key
+        .as_deref()
+        .context("Proton topology server is missing peer public key")?;
+    Ok(PersistentCertificateFeatures::proton(
+        peer_name,
+        peer_ip,
+        peer_public_key,
+    ))
+}
+
+fn proton_persistent_peer_ip(server: &PhysicalServer) -> Result<String> {
+    if let Some(peer_ip) = server
+        .entry_per_protocol
+        .get("WireGuardUDP")
+        .and_then(|entry| entry.ipv4.clone())
+    {
+        return Ok(peer_ip);
+    }
+
+    if let Some(peer_ip) = server.entry_ip.clone() {
+        return Ok(peer_ip);
+    }
+
+    if let Some(peer_ip) = server.exit_ip.clone() {
+        return Ok(peer_ip);
+    }
+
+    server
+        .domain
+        .clone()
+        .context("Proton topology server is missing a usable peer IP")
+}
 async fn refresh_topology(runtime: &SupervisorRuntime, account_name: &str) -> Result<()> {
     let output = topology_output_path(&runtime.context, &runtime.render);
     let account = runtime.proton_accounts.get_required(account_name)?;
@@ -706,12 +787,15 @@ fn first_proton_account_name(specs: &[EndpointSpec]) -> Option<String> {
     })
 }
 
-fn endpoint_username(runtime: &SupervisorRuntime, spec: &EndpointSpec) -> Option<String> {
+fn endpoint_username<'a>(
+    runtime: &'a SupervisorRuntime,
+    spec: &'a EndpointSpec,
+) -> Option<&'a str> {
     match spec {
         EndpointSpec::Proton(spec) => runtime
             .proton_accounts
             .get(&spec.account)
-            .map(|account| account.username.clone()),
+            .map(|account| account.username.as_str()),
         EndpointSpec::StaticWireGuard(_) => None,
     }
 }

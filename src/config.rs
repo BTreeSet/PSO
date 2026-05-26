@@ -170,6 +170,12 @@ pub struct ControlPlaneDefaults {
 pub struct RunConfig {
     pub proxy_url: Option<String>,
     pub interval_secs: Option<u64>,
+    #[serde(default = "default_session_keepalive_interval_secs")]
+    pub session_keepalive_interval_secs: u64,
+}
+
+fn default_session_keepalive_interval_secs() -> u64 {
+    900
 }
 
 pub fn read_optional_config(path: &PathBuf) -> Result<AppConfig> {

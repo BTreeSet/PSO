@@ -79,6 +79,7 @@
   },
   "run": {
     "proxy_url": "socks5h://127.0.0.1:1081",
-    "interval_secs": 300
+    "interval_secs": 300,
+    "session_keepalive_interval_secs": 900
   }
 }
