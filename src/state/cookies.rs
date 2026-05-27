@@ -400,6 +400,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_bare_tld_cookie_domains() {
+        let cookie = parse_set_cookie(
+            "Session-Id=session-123; Domain=com; Path=/; Secure",
+            "account.protonvpn.com",
+            "/api/core/v4/auth",
+            1_000_000,
+        );
+
+        assert!(cookie.is_none());
+    }
+
+    #[test]
     fn matches_domains_and_paths_like_browser_cookies() {
         let row = PersistedCookieRow {
             name: "Session-Id".into(),

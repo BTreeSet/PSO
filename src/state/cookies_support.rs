@@ -66,10 +66,17 @@ pub(super) fn domain_matches(cookie_domain: &str, request_host: &str, host_only:
         return request_host == cookie_domain;
     }
 
-    request_host == cookie_domain
-        || request_host
-            .strip_suffix(&cookie_domain)
-            .is_some_and(|prefix| prefix.ends_with('.'))
+    if request_host == cookie_domain {
+        return true;
+    }
+
+    if !cookie_domain.contains('.') {
+        return false;
+    }
+
+    request_host
+        .strip_suffix(&cookie_domain)
+        .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 pub(super) fn path_matches(cookie_path: &str, request_path: &str) -> bool {
@@ -100,7 +107,12 @@ pub(super) fn cookie_domain_candidates(request_host: &str) -> Vec<String> {
     let mut candidates = Vec::new();
     let mut suffix = request_host.as_str();
     loop {
-        candidates.push(suffix.to_string());
+        if suffix == request_host || suffix.contains('.') {
+            candidates.push(suffix.to_string());
+        } else {
+            break;
+        }
+
         match suffix.find('.') {
             Some(index) => suffix = &suffix[index + 1..],
             None => break,
@@ -121,7 +133,6 @@ mod tests {
             vec![
                 "account.protonvpn.com".to_string(),
                 "protonvpn.com".to_string(),
-                "com".to_string(),
             ]
         );
     }
@@ -132,5 +143,16 @@ mod tests {
             cookie_domain_candidates("localhost"),
             vec!["localhost".to_string()]
         );
+    }
+
+    #[test]
+    fn matches_parent_domains_but_not_bare_tlds() {
+        assert!(domain_matches(
+            "protonvpn.com",
+            "account.protonvpn.com",
+            false
+        ));
+        assert!(!domain_matches("com", "account.protonvpn.com", false));
+        assert!(domain_matches("localhost", "localhost", false));
     }
 }
