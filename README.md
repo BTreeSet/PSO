@@ -25,7 +25,7 @@ PSO separates runtime inputs into three categories:
 - Declarative configuration: files the operator edits, such as `config.template.json`.
 - State directory: an opaque directory managed by PSO for data that must persist across reboots, including `pso.sqlite3` for sessions/events/health history and `logicals.json` for the last known Proton logical topology.
 
-The state directory defaults to `pso-state` for local runs. In containers, mount it on durable storage and set `PSO_STATE_DIR`, for example `/var/lib/pso`.
+The state directory defaults to `pso-state` for local runs. In containers, mount it on durable storage; the published runtime image sets `PSO_STATE_DIR=/var/lib/pso` so state survives command overrides like `docker run ... debug auth login`.
 
 Global options are passed before the command group:
 
@@ -223,7 +223,7 @@ The Dockerfile builds PSO and copies `/usr/local/bin/sing-box` from `ghcr.io/sag
 The container default command is:
 
 ```bash
-pso --config /etc/pso/pso.config.json --state-dir /var/lib/pso run
+pso --config /etc/pso/pso.config.json run
 ```
 
 The intended Docker setup mounts:

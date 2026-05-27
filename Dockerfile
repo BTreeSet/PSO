@@ -14,7 +14,8 @@ LABEL org.opencontainers.image.title="Proton-Singbox Orchestrator"
 LABEL org.opencontainers.image.description="PSO control plane with bundled sing-box runtime"
 RUN set -ex \
     && apk add --no-cache --upgrade bash tzdata ca-certificates nftables
+ENV PSO_STATE_DIR=/var/lib/pso
 COPY --from=builder /src/target/release/pso /usr/local/bin/pso
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 ENTRYPOINT ["/usr/local/bin/pso"]
-CMD ["--config", "/etc/pso/pso.config.json", "--state-dir", "/var/lib/pso", "run"]
+CMD ["--config", "/etc/pso/pso.config.json", "run"]

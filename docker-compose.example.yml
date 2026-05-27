@@ -3,6 +3,8 @@ services:
     image: ghcr.io/OWNER/REPOSITORY:latest
     container_name: pso
     restart: unless-stopped
+    environment:
+      PSO_STATE_DIR: /var/lib/pso
     cap_add:
       - NET_ADMIN
     devices:
