@@ -1,5 +1,5 @@
 use anyhow::Result;
-use pso::cli::{StateArgs, StateCommand, StateListArgs};
+use pso::cli::{CookieClearArgs, CookieCommand, StateArgs, StateCommand, StateListArgs};
 use pso::config::RuntimeContext;
 use pso::state::{
     CertificateRow, HealthCheckRow, RuntimeEventRow, StateStore, UserRow, WireGuardEndpointRow,
@@ -15,6 +15,9 @@ pub fn run_state(context: &RuntimeContext, args: StateArgs) -> Result<()> {
         }
         StateCommand::Events(args) => print_events(&store.list_events(args.limit)?, &args),
         StateCommand::Health(args) => print_health(&store.list_health_checks(args.limit)?, &args),
+        StateCommand::Cookies(args) => match args.command {
+            CookieCommand::Clear(args) => clear_cookies(&store, args),
+        },
     }
 }
 
@@ -149,6 +152,23 @@ fn print_health(rows: &[HealthCheckRow], args: &StateListArgs) -> Result<()> {
             row.reason
         );
     }
+    Ok(())
+}
+
+fn clear_cookies(store: &StateStore, args: CookieClearArgs) -> Result<()> {
+    if args.all && args.username.is_some() {
+        anyhow::bail!("--all cannot be combined with --username");
+    }
+
+    let deleted = if args.all {
+        store.clear_proton_cookies()?
+    } else if let Some(username) = args.username {
+        store.clear_proton_cookies_for_username(&username)?
+    } else {
+        anyhow::bail!("pass --all or --username <value>");
+    };
+
+    println!("deleted {} Proton cookies", deleted);
     Ok(())
 }
 

@@ -9,6 +9,8 @@ use reqwest::{
 use serde::de::DeserializeOwned;
 use tokio::time::sleep;
 
+const REDACTED_VALUE: &str = "<redacted>";
+
 use super::human_verification::{HUMAN_VERIFICATION_CAPTCHA_TYPE, HumanVerificationChallenge};
 
 pub(crate) const PROTON_LOGICALS_PROTOCOLS: &str = "WireGuardUDP,WireGuardTCP,WireGuardTLS";
@@ -104,10 +106,15 @@ pub(crate) fn with_browser_origin_headers(
         .header("referer", referer)
 }
 
-pub(crate) async fn send_json_with_retry<T, F>(mut build: F, debug_http: bool) -> Result<T>
+pub(crate) async fn send_json_with_retry_with_observer<T, F, O>(
+    mut build: F,
+    debug_http: bool,
+    mut observe: O,
+) -> Result<T>
 where
     T: DeserializeOwned,
     F: FnMut() -> RequestBuilder,
+    O: FnMut(&Response) -> Result<()>,
 {
     let mut last_error = None;
     for attempt in 0..3 {
@@ -123,19 +130,23 @@ where
         }
 
         match request.send().await {
-            Ok(response) if has_human_verification(&response) => {
+            Ok(response) => {
+                observe(&response)?;
+                if has_human_verification(&response) {
+                    return decode_response(response, debug_http).await;
+                }
+                if is_retryable(response.status()) && attempt < 2 {
+                    if debug_http {
+                        eprintln!(
+                            "[pso-debug] <-- retryable response; retrying request after {} ms",
+                            250 * (attempt + 1) as u64
+                        );
+                    }
+                    sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+                    continue;
+                }
                 return decode_response(response, debug_http).await;
             }
-            Ok(response) if is_retryable(response.status()) && attempt < 2 => {
-                if debug_http {
-                    eprintln!(
-                        "[pso-debug] <-- retryable response; retrying request after {} ms",
-                        250 * (attempt + 1) as u64
-                    );
-                }
-                sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
-            }
-            Ok(response) => return decode_response(response, debug_http).await,
             Err(error) if attempt < 2 => {
                 if debug_http {
                     eprintln!(
@@ -253,7 +264,7 @@ fn debug_request_attempt(attempt: usize, total_attempts: usize, request: &Reques
             output,
             "[pso-debug]     {}: {}",
             name,
-            header_value_to_text(value)
+            header_value_to_text(name.as_str(), value)
         );
     }
 
@@ -282,7 +293,7 @@ fn debug_response_attempt(status: StatusCode, url: &reqwest::Url, headers: &Head
             output,
             "[pso-debug]     {}: {}",
             name,
-            header_value_to_text(value)
+            header_value_to_text(name.as_str(), value)
         );
     }
     let _ = writeln!(output, "[pso-debug] <-- body:");
@@ -293,7 +304,10 @@ fn debug_response_attempt(status: StatusCode, url: &reqwest::Url, headers: &Head
 fn format_headers(headers: &HeaderMap) -> String {
     let mut parts = Vec::new();
     for (name, value) in headers {
-        parts.push(format!("{name}: {}", header_value_to_text(value)));
+        parts.push(format!(
+            "{name}: {}",
+            header_value_to_text(name.as_str(), value)
+        ));
     }
 
     if parts.is_empty() {
@@ -303,17 +317,83 @@ fn format_headers(headers: &HeaderMap) -> String {
     }
 }
 
-fn header_value_to_text(value: &HeaderValue) -> String {
+fn header_value_to_text(name: &str, value: &HeaderValue) -> String {
+    if is_sensitive_header_name(name) {
+        return REDACTED_VALUE.to_string();
+    }
+
     value
         .to_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|_| format!("{:?}", value.as_bytes()))
 }
 
+fn is_sensitive_header_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "cookie" | "set-cookie" | "x-pm-human-verification-token"
+    )
+}
+
 fn body_bytes_to_text(bytes: &[u8]) -> String {
-    std::str::from_utf8(bytes)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|_| format!("{:?}", bytes))
+    match std::str::from_utf8(bytes) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(text)
+            .map(|value| {
+                serde_json::to_string_pretty(&redact_json_value(value))
+                    .unwrap_or_else(|_| text.to_string())
+            })
+            .unwrap_or_else(|_| text.to_string()),
+        Err(_) => format!("{:?}", bytes),
+    }
+}
+
+fn redact_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| {
+                    if is_sensitive_json_key(&key) {
+                        (key, serde_json::Value::String(REDACTED_VALUE.to_string()))
+                    } else {
+                        (key, redact_json_value(value))
+                    }
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(redact_json_value).collect())
+        }
+        other => other,
+    }
+}
+
+fn is_sensitive_json_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "accesstoken"
+            | "access_token"
+            | "refreshtoken"
+            | "refresh_token"
+            | "clientproof"
+            | "client_proof"
+            | "clientephemeral"
+            | "client_ephemeral"
+            | "password"
+            | "passwordfile"
+            | "password_file"
+            | "twofactorcode"
+            | "two_factor_code"
+            | "state"
+            | "key"
+            | "privatekey"
+            | "private_key"
+            | "publickey"
+            | "public_key"
+            | "sessionid"
+            | "session_id"
+    )
 }
 
 #[cfg(test)]

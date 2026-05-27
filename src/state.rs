@@ -1,10 +1,13 @@
 use std::fs;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 use crate::config::RuntimeContext;
 mod certificates;
+mod cookies;
+mod cookies_support;
 mod observability;
 mod paths;
 mod schema;
@@ -26,9 +29,14 @@ pub struct StateStore {
 
 impl StateStore {
     pub fn open(context: &RuntimeContext) -> Result<Self> {
-        fs::create_dir_all(&context.state_dir)
-            .with_context(|| format!("failed to create {}", context.state_dir.display()))?;
-        let connection = Connection::open(state_db_file(context))?;
+        Self::open_in(&context.state_dir)
+    }
+
+    pub fn open_in(state_dir: impl AsRef<Path>) -> Result<Self> {
+        let state_dir = state_dir.as_ref();
+        fs::create_dir_all(state_dir)
+            .with_context(|| format!("failed to create {}", state_dir.display()))?;
+        let connection = Connection::open(state_dir.join("pso.sqlite3"))?;
         let store = Self { connection };
         store.migrate()?;
         Ok(store)

@@ -107,7 +107,7 @@ pub async fn login_with_prompts(
         ProtonApiClient::from_context(context)?
     };
     let mut login_intent = LoginIntent::Auto;
-    let bootstrap = api.create_unauth_session().await?;
+    let bootstrap = api.create_unauth_session(username).await?;
     let info = loop {
         match api
             .auth_info(
@@ -196,7 +196,7 @@ pub async fn login_with_prompts(
             ),
         };
         let totp = resolve_two_factor_code(&totp_input)?;
-        api.authenticate_two_factor(&auth_response.tokens, &totp)
+        api.authenticate_two_factor(username, &auth_response.tokens, &totp)
             .await?;
     }
 
@@ -279,6 +279,7 @@ fn human_verification_headless_error(challenge: &HumanVerificationChallenge) -> 
 
 pub async fn refresh_stored_proton_session(
     context: &RuntimeContext,
+    username: &str,
     state: &ProtonSessionState,
     debug_http: bool,
 ) -> Result<AuthTokens> {
@@ -287,7 +288,8 @@ pub async fn refresh_stored_proton_session(
     } else {
         ProtonApiClient::from_context(context)?
     };
-    api.refresh_session(&state.uid, &state.refresh_token).await
+    api.refresh_session(username, &state.uid, &state.refresh_token)
+        .await
 }
 
 pub async fn refresh_stored_proton_session_tokens(
@@ -300,7 +302,7 @@ pub async fn refresh_stored_proton_session_tokens(
         return Ok(None);
     };
 
-    let tokens = refresh_stored_proton_session(context, &state, debug_http).await?;
+    let tokens = refresh_stored_proton_session(context, username, &state, debug_http).await?;
     store_tokens_in_state(&store, username, Some(&state.uid), &tokens)?;
     Ok(Some(RefreshedProtonSession {
         uid: state.uid,

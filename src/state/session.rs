@@ -50,4 +50,18 @@ impl StateStore {
         self.load_proton_session_optional(username)?
             .with_context(|| format!("Proton session state was not found for {username}"))
     }
+
+    pub fn load_username_by_uid(&self, uid: &str) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT a.username
+                 FROM vpn_sessions s
+                   INNER JOIN users a ON a.username_key = s.username_key
+                 WHERE s.uid = ?1",
+                params![uid],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
 }

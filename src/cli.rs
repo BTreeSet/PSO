@@ -86,6 +86,26 @@ pub enum StateCommand {
     Wireguard(StateListArgs),
     Events(StateListArgs),
     Health(StateListArgs),
+    Cookies(CookieArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CookieArgs {
+    #[command(subcommand)]
+    pub command: CookieCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CookieCommand {
+    Clear(CookieClearArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CookieClearArgs {
+    #[arg(long)]
+    pub username: Option<String>,
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]

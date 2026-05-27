@@ -22,6 +22,21 @@ impl StateStore {
                refresh_token TEXT NOT NULL,
                updated_at INTEGER NOT NULL
              );
+                         CREATE TABLE IF NOT EXISTS proton_cookies (
+                                                         username_key TEXT NOT NULL REFERENCES users(username_key) ON DELETE CASCADE,
+                             cookie_name TEXT NOT NULL,
+                             cookie_domain TEXT NOT NULL,
+                             cookie_path TEXT NOT NULL,
+                             cookie_value TEXT NOT NULL,
+                             host_only INTEGER NOT NULL,
+                             secure INTEGER NOT NULL,
+                             http_only INTEGER NOT NULL,
+                             same_site TEXT,
+                             expires_at_ms INTEGER,
+                             created_at INTEGER NOT NULL,
+                             updated_at INTEGER NOT NULL,
+                             PRIMARY KEY (username_key, cookie_name, cookie_domain, cookie_path)
+                         );
              CREATE TABLE IF NOT EXISTS runtime_events (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                occurred_at INTEGER NOT NULL,
@@ -89,6 +104,8 @@ impl StateStore {
                          );
                          CREATE INDEX IF NOT EXISTS idx_events_username_time
                              ON runtime_events(username_key, occurred_at);
+                         CREATE INDEX IF NOT EXISTS idx_proton_cookies_username_domain_path
+                             ON proton_cookies(username_key, cookie_domain, cookie_path, cookie_name);
                          CREATE INDEX IF NOT EXISTS idx_health_username_outbound_time
                                                          ON health_checks(username_key, outbound_tag, occurred_at);
                                                  CREATE INDEX IF NOT EXISTS idx_certificates_username
