@@ -18,8 +18,9 @@ use crate::filter::{ServerFilter, select_target};
 use crate::health::{HealthMonitor, HealthStatus, ProbeResult};
 use crate::model::{LogicalServer, PhysicalServer, ProtonLogicalResponse};
 use crate::proton::{
-    CachedAccessToken, PROTON_WIREGUARD_ADDRESS_V4, PROTON_WIREGUARD_KEEPALIVE_INTERVAL,
-    ensure_user_access_token, proton_wireguard_assigned_ips,
+    CachedAccessToken, ConfiguredLoginOptions, PROTON_WIREGUARD_ADDRESS_V4,
+    PROTON_WIREGUARD_KEEPALIVE_INTERVAL, ensure_user_access_token, login_configured_user,
+    persist_proton_session, proton_wireguard_assigned_ips, refresh_stored_proton_session_tokens,
 };
 use crate::provider::{
     PROTON_PROVIDER, ProvidersConfig, WireGuardEndpointOverrides, WireGuardServerFilter,
@@ -190,6 +191,10 @@ async fn run_continuous(runtime: SupervisorRuntime) -> Result<()> {
         let outbound_tx = deploy_tx.clone();
         tokio::spawn(async move { outbound_loop(outbound_runtime, spec, outbound_tx).await });
     }
+    for username in runtime.sessions.keys().cloned() {
+        let refresh_runtime = runtime.clone();
+        tokio::spawn(async move { session_refresh_loop(refresh_runtime, username).await });
+    }
     if runtime.options.session_keepalive_interval.is_some() {
         for username in runtime.sessions.keys().cloned() {
             let keepalive_runtime = runtime.clone();
@@ -234,6 +239,173 @@ async fn topology_loop(runtime: SupervisorRuntime, username: String, deploy_tx: 
             }
         }
     }
+}
+
+async fn deployment_loop(runtime: SupervisorRuntime, mut deploy_rx: mpsc::Receiver<()>) {
+    while deploy_rx.recv().await.is_some() {
+        sleep(DEFAULT_COALESCE_DELAY).await;
+        while deploy_rx.try_recv().is_ok() {}
+        if let Err(error) = render_and_deploy(&runtime).await {
+            error!(%error, "coalesced sing-box deployment failed");
+            record_runtime_error(
+                &runtime.context,
+                None,
+                None,
+                "coalesced_deployment_failed",
+                &error,
+            );
+        }
+    }
+}
+
+async fn process_endpoint(
+    runtime: &SupervisorRuntime,
+    spec: &EndpointSpec,
+    force_refresh: bool,
+) -> Result<bool> {
+    match spec {
+        EndpointSpec::Proton(spec) => process_proton_endpoint(runtime, spec, force_refresh).await,
+        EndpointSpec::StaticWireGuard(spec) => {
+            process_static_wireguard_endpoint(runtime, spec, force_refresh).await
+        }
+    }
+}
+
+async fn keepalive_proton_session(runtime: &SupervisorRuntime, username: &str) -> Result<()> {
+    let access_token = access_token_for_username(runtime, username).await?;
+    let api = ProtonApiClient::from_context(&runtime.context)?;
+    let _ = api.list_sessions(&access_token).await?;
+    Ok(())
+}
+
+async fn session_refresh_loop(runtime: SupervisorRuntime, username: String) {
+    let Some(token_state) = runtime.token_states.get(&username).cloned() else {
+        return;
+    };
+
+    let user = match runtime.proton_users.get_required(&username) {
+        Ok(user) => user.clone(),
+        Err(error) => {
+            warn!(%error, username = %username, "missing Proton user for refresh loop");
+            record_runtime_error(
+                &runtime.context,
+                Some(&username),
+                None,
+                "proton_session_refresh_loop_missing_user",
+                &error,
+            );
+            return;
+        }
+    };
+
+    let mut refresh_failures = 0u32;
+    loop {
+        let delay = {
+            let cache = token_state.lock().await;
+            cache
+                .next_refresh_delay(refresh_failures)
+                .unwrap_or(Duration::ZERO)
+        };
+
+        if !delay.is_zero() {
+            sleep(delay).await;
+        }
+
+        let mut recovery_sleep = None;
+        {
+            let mut cache = token_state.lock().await;
+            match refresh_stored_proton_session_tokens(&runtime.context, &username, false).await {
+                Ok(Some(session)) => {
+                    cache.store(&session.tokens, Some(&session.uid));
+                    refresh_failures = 0;
+                }
+                Ok(None) => {
+                    if let Err(error) = bootstrap_proton_session(&runtime, &user, &mut cache).await
+                    {
+                        warn!(username = %username, %error, "Proton session bootstrap failed");
+                        record_runtime_error(
+                            &runtime.context,
+                            Some(&username),
+                            None,
+                            "proton_session_bootstrap_failed",
+                            &error,
+                        );
+                        recovery_sleep = Some(Duration::from_secs(30));
+                    } else {
+                        refresh_failures = 0;
+                    }
+                }
+                Err(error) => {
+                    refresh_failures = refresh_failures.saturating_add(1);
+                    warn!(username = %username, refresh_failures, %error, "Proton session refresh failed");
+                    record_runtime_error(
+                        &runtime.context,
+                        Some(&username),
+                        None,
+                        "proton_session_refresh_failed",
+                        &error,
+                    );
+
+                    let expired = cache
+                        .refresh_window()
+                        .map(|window| current_time_ms() >= window.expires_at_ms)
+                        .unwrap_or(false);
+
+                    if expired {
+                        if let Err(login_error) =
+                            bootstrap_proton_session(&runtime, &user, &mut cache).await
+                        {
+                            warn!(username = %username, %login_error, "Proton session headless recovery failed");
+                            record_runtime_error(
+                                &runtime.context,
+                                Some(&username),
+                                None,
+                                "proton_session_recovery_failed",
+                                &login_error,
+                            );
+                            recovery_sleep = Some(Duration::from_secs(30));
+                        } else {
+                            refresh_failures = 0;
+                        }
+                    } else if cache.refresh_window().is_none() {
+                        recovery_sleep = Some(Duration::from_secs(30));
+                    }
+                }
+            }
+        }
+
+        if let Some(delay) = recovery_sleep {
+            sleep(delay).await;
+        }
+    }
+}
+
+async fn bootstrap_proton_session(
+    runtime: &SupervisorRuntime,
+    user: &crate::users::ProtonUser,
+    cache: &mut CachedAccessToken,
+) -> Result<()> {
+    user.ensure_can_login_headless()
+        .with_context(|| format!("Proton user '{}' cannot recover headlessly", user.username))?;
+
+    let tokens = login_configured_user(
+        &runtime.context,
+        user,
+        ConfiguredLoginOptions {
+            password_override: None,
+            password_file_override: None,
+            totp_override: None,
+            no_prompt_override: true,
+            human_verification_token: None,
+            debug_http: false,
+        },
+    )
+    .await
+    .with_context(|| format!("failed to recover Proton session for {}", user.username))?;
+
+    persist_proton_session(&runtime.context, &user.username, None, &tokens)?;
+    cache.store(&tokens, tokens.uid.as_deref());
+    Ok(())
 }
 
 async fn outbound_loop(
@@ -284,43 +456,6 @@ async fn session_keepalive_loop(runtime: SupervisorRuntime, username: String) {
                 "proton_session_keepalive_failed",
                 &error,
             );
-        }
-    }
-}
-
-async fn keepalive_proton_session(runtime: &SupervisorRuntime, username: &str) -> Result<()> {
-    let access_token = access_token_for_username(runtime, username).await?;
-    let api = ProtonApiClient::from_context(&runtime.context)?;
-    let _ = api.list_sessions(&access_token).await?;
-    Ok(())
-}
-
-async fn deployment_loop(runtime: SupervisorRuntime, mut deploy_rx: mpsc::Receiver<()>) {
-    while deploy_rx.recv().await.is_some() {
-        sleep(DEFAULT_COALESCE_DELAY).await;
-        while deploy_rx.try_recv().is_ok() {}
-        if let Err(error) = render_and_deploy(&runtime).await {
-            error!(%error, "coalesced sing-box deployment failed");
-            record_runtime_error(
-                &runtime.context,
-                None,
-                None,
-                "coalesced_deployment_failed",
-                &error,
-            );
-        }
-    }
-}
-
-async fn process_endpoint(
-    runtime: &SupervisorRuntime,
-    spec: &EndpointSpec,
-    force_refresh: bool,
-) -> Result<bool> {
-    match spec {
-        EndpointSpec::Proton(spec) => process_proton_endpoint(runtime, spec, force_refresh).await,
-        EndpointSpec::StaticWireGuard(spec) => {
-            process_static_wireguard_endpoint(runtime, spec, force_refresh).await
         }
     }
 }

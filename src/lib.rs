@@ -21,6 +21,7 @@ mod state_model;
 pub mod supervisor;
 mod supervisor_render;
 pub mod template;
+mod token_refresh;
 pub mod users;
 
 pub use api::{CertificateRequest, CertificateResponse, ProtonAccessToken, ProtonApiClient};

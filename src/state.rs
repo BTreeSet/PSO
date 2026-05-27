@@ -52,9 +52,12 @@ mod tests {
         store
             .store_proton_session("alice@example.com", "uid", "refresh")
             .unwrap();
+        store
+            .store_proton_session("alice@example.com", "uid-2", "refresh-rotated")
+            .unwrap();
         let session = store.load_proton_session("alice@example.com").unwrap();
-        assert_eq!(session.uid, "uid");
-        assert_eq!(session.refresh_token, "refresh");
+        assert_eq!(session.uid, "uid-2");
+        assert_eq!(session.refresh_token, "refresh-rotated");
 
         store
             .record_health(HealthRecord {

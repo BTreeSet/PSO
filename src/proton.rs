@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose};
@@ -13,9 +14,9 @@ use crate::api::{
 use crate::auth::{calculate_srp_proof, resolve_two_factor_code};
 use crate::config::RuntimeContext;
 use crate::state::{ProtonSessionState, StateStore};
+use crate::token_refresh::TokenRefreshWindow;
 use crate::users::ProtonUser;
 
-const ACCESS_TOKEN_REFRESH_MARGIN_MS: i64 = 60_000;
 pub const PROTON_WIREGUARD_ADDRESS_V4: &str = "10.2.0.2/32";
 pub const PROTON_WIREGUARD_KEEPALIVE_INTERVAL: u16 = 60;
 
@@ -24,6 +25,7 @@ pub struct CachedAccessToken {
     pub access_token: Option<String>,
     pub uid: Option<String>,
     pub expires_at_ms: Option<i64>,
+    pub refresh_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,11 +44,18 @@ pub struct ConfiguredLoginOptions {
     pub debug_http: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct RefreshedProtonSession {
+    pub uid: String,
+    pub tokens: AuthTokens,
+}
+
 impl CachedAccessToken {
     pub fn fresh_token(&self) -> Option<ProtonAccessToken> {
-        let expires_at_ms = self.expires_at_ms?;
         let access_token = self.access_token.as_ref()?;
-        (expires_at_ms > current_time_ms() + ACCESS_TOKEN_REFRESH_MARGIN_MS)
+        let window = self.refresh_window()?;
+        window
+            .should_reuse(current_time_ms())
             .then(|| ProtonAccessToken::new(access_token.clone(), self.uid.clone()))
     }
 
@@ -57,9 +66,29 @@ impl CachedAccessToken {
             .clone()
             .or_else(|| fallback_uid.map(ToOwned::to_owned))
             .or_else(|| self.uid.clone());
-        self.expires_at_ms = tokens
+
+        if let Some(window) = tokens
             .expires_in
-            .map(|seconds| current_time_ms() + seconds as i64 * 1000);
+            .and_then(|seconds| TokenRefreshWindow::from_expires_in(current_time_ms(), seconds))
+        {
+            self.refresh_at_ms = Some(window.refresh_at_ms);
+            self.expires_at_ms = Some(window.expires_at_ms);
+        } else {
+            self.refresh_at_ms = None;
+            self.expires_at_ms = None;
+        }
+    }
+
+    pub fn refresh_window(&self) -> Option<TokenRefreshWindow> {
+        Some(TokenRefreshWindow {
+            refresh_at_ms: self.refresh_at_ms?,
+            expires_at_ms: self.expires_at_ms?,
+        })
+    }
+
+    pub fn next_refresh_delay(&self, failure_count: u32) -> Option<Duration> {
+        self.refresh_window()
+            .map(|window| window.delay_until_next_attempt(current_time_ms(), failure_count))
     }
 }
 
@@ -261,6 +290,24 @@ pub async fn refresh_stored_proton_session(
     api.refresh_session(&state.uid, &state.refresh_token).await
 }
 
+pub async fn refresh_stored_proton_session_tokens(
+    context: &RuntimeContext,
+    username: &str,
+    debug_http: bool,
+) -> Result<Option<RefreshedProtonSession>> {
+    let store = StateStore::open(context)?;
+    let Some(state) = store.load_proton_session_optional(username)? else {
+        return Ok(None);
+    };
+
+    let tokens = refresh_stored_proton_session(context, &state, debug_http).await?;
+    store_tokens_in_state(&store, username, Some(&state.uid), &tokens)?;
+    Ok(Some(RefreshedProtonSession {
+        uid: state.uid,
+        tokens,
+    }))
+}
+
 pub fn persist_proton_session(
     context: &RuntimeContext,
     username: &str,
@@ -307,37 +354,15 @@ pub async fn ensure_user_access_token(
         return Ok(token);
     }
 
-    let store = StateStore::open(context)?;
-    match store.load_proton_session_optional(&user.username)? {
-        Some(state) => match refresh_stored_proton_session(context, &state, false).await {
-            Ok(tokens) => {
-                store_tokens_in_state(&store, &user.username, Some(&state.uid), &tokens)?;
-                cache.store(&tokens, Some(&state.uid));
-                Ok(ProtonAccessToken::from_tokens(&tokens, Some(&state.uid)))
-            }
-            Err(refresh_error) => {
-                let refresh_error_message = refresh_error.to_string();
-                record_session_event(
-                    &store,
-                    &user.username,
-                    "proton_session_refresh_failed",
-                    json!({
-                        "username": user.username,
-                        "error": refresh_error_message,
-                    }),
-                );
-                login_and_store_user_access_token(
-                    context,
-                    user,
-                    cache,
-                    Some(&state.uid),
-                    SessionLoginReason::RefreshFailure,
-                    Some(refresh_error_message.as_str()),
-                )
-                .await
-            }
-        },
-        None => {
+    match refresh_stored_proton_session_tokens(context, &user.username, false).await {
+        Ok(Some(session)) => {
+            cache.store(&session.tokens, Some(&session.uid));
+            Ok(ProtonAccessToken::from_tokens(
+                &session.tokens,
+                Some(&session.uid),
+            ))
+        }
+        Ok(None) => {
             login_and_store_user_access_token(
                 context,
                 user,
@@ -345,6 +370,31 @@ pub async fn ensure_user_access_token(
                 None,
                 SessionLoginReason::MissingStoredSession,
                 None,
+            )
+            .await
+        }
+        Err(refresh_error) => {
+            let store = StateStore::open(context)?;
+            let refresh_error_message = refresh_error.to_string();
+            record_session_event(
+                &store,
+                &user.username,
+                "proton_session_refresh_failed",
+                json!({
+                    "username": user.username,
+                    "error": refresh_error_message,
+                }),
+            );
+            let stored_uid = store
+                .load_proton_session_optional(&user.username)?
+                .map(|state| state.uid);
+            login_and_store_user_access_token(
+                context,
+                user,
+                cache,
+                stored_uid.as_deref(),
+                SessionLoginReason::RefreshFailure,
+                Some(refresh_error_message.as_str()),
             )
             .await
         }
@@ -535,6 +585,7 @@ mod tests {
         let token = cache.fresh_token().expect("cached token should be fresh");
         assert_eq!(token.access_token, "access");
         assert_eq!(token.uid.as_deref(), Some("uid-from-state"));
+        assert!(cache.refresh_window().is_some());
     }
 
     #[test]
@@ -549,6 +600,19 @@ mod tests {
         };
 
         cache.store(&tokens, None);
+
+        assert!(cache.fresh_token().is_none());
+        assert!(cache.refresh_window().is_none());
+    }
+
+    #[test]
+    fn cached_access_token_stops_reuse_after_refresh_deadline() {
+        let mut cache = CachedAccessToken::default();
+        let now_ms = current_time_ms();
+        cache.access_token = Some("access".into());
+        cache.uid = Some("uid-from-token".into());
+        cache.expires_at_ms = Some(now_ms + 120_000);
+        cache.refresh_at_ms = Some(now_ms - 1);
 
         assert!(cache.fresh_token().is_none());
     }

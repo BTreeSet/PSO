@@ -20,7 +20,7 @@ use pso::model::{PhysicalServer, ProtonLogicalResponse};
 use pso::process::{find_process_pid, find_process_pid_by_exe};
 use pso::proton::{
     CachedAccessToken, ConfiguredLoginOptions, login_configured_user, login_with_prompts,
-    persist_proton_session, refresh_stored_proton_session,
+    persist_proton_session,
 };
 use pso::provider::known_wireguard_providers;
 use pso::state::{StateStore, topology_state_file, write_state_file};
@@ -454,22 +454,20 @@ async fn refresh_vpn_token(
     } else {
         anyhow::bail!("a Proton username is required; pass --username")
     };
-    let store = StateStore::open(context)?;
-    let state = store.load_proton_session(&username)?;
     let relogin_hint = format!("pso auth login --username {username}");
-    let refreshed = refresh_stored_proton_session(context, &state, false)
+    let refreshed = pso::proton::refresh_stored_proton_session_tokens(context, &username, false)
         .await
         .with_context(|| {
             format!(
                 "failed to refresh stored Proton session for {username}; if the stored session is expired or revoked, re-authenticate with '{relogin_hint}'"
             )
-        })?;
-    persist_proton_session(context, &username, Some(&state.uid), &refreshed)?;
+        })?
+        .context("Proton session state was not found")?;
 
     if let Some(output) = args.output {
-        write_json_output(&output, &refreshed)?;
+        write_json_output(&output, &refreshed.tokens)?;
     } else {
-        println!("{}", serde_json::to_string_pretty(&refreshed)?);
+        println!("{}", serde_json::to_string_pretty(&refreshed.tokens)?);
     }
 
     Ok(())
@@ -480,25 +478,18 @@ async fn refresh_stored_login_session(
     username: &str,
     debug_http: bool,
 ) -> Result<Option<AuthTokens>> {
-    let store = StateStore::open(context)?;
-    let Some(state) = store.load_proton_session_optional(username)? else {
-        return Ok(None);
-    };
-
-    let refreshed = match refresh_stored_proton_session(context, &state, debug_http).await {
-        Ok(tokens) => tokens,
+    match pso::proton::refresh_stored_proton_session_tokens(context, username, debug_http).await {
+        Ok(Some(session)) => Ok(Some(session.tokens)),
+        Ok(None) => Ok(None),
         Err(error) => {
             if debug_http {
                 eprintln!(
                     "[pso-debug] stored Proton session for {username} could not be refreshed; falling back to password login: {error:#}"
                 );
             }
-            return Ok(None);
+            Ok(None)
         }
-    };
-
-    persist_proton_session(context, username, Some(&state.uid), &refreshed)?;
-    Ok(Some(refreshed))
+    }
 }
 
 fn resolve_cli_password(

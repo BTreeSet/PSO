@@ -251,6 +251,7 @@ mod tests {
             "UID": "uid-123",
             "AccessToken": "access-token",
             "RefreshToken": "refresh-token",
+            "ExpiresIn": 86400,
             "TwoFactor": 1,
             "2FA": {
                 "Enabled": 1,
@@ -261,6 +262,7 @@ mod tests {
 
         assert!(response.requires_two_factor());
         assert!(response.supports_totp());
+        assert_eq!(response.tokens.expires_in, Some(86400));
 
         let two_factor = serde_json::to_value(LoginTwoFactorBody {
             two_factor_code: "123456".into(),
