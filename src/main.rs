@@ -27,6 +27,7 @@ use pso::state::{StateStore, topology_state_file, write_state_file};
 use pso::supervisor::{SupervisorOptions, run_supervisor};
 use pso::users::{ProtonUserRegistry, require_single_user_access_token};
 
+mod debug_cli;
 mod state_cli;
 
 #[tokio::main]
@@ -78,6 +79,7 @@ async fn main() -> Result<()> {
             DebugCommand::Auth(args) => match args.command {
                 DebugAuthCommand::Login(args) => login(&context, &config.auth, args, true).await,
             },
+            DebugCommand::Db(args) => debug_cli::run_debug_db(&context, args),
         },
     }
 }

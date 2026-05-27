@@ -8,6 +8,7 @@ use crate::config::RuntimeContext;
 mod certificates;
 mod cookies;
 mod cookies_support;
+mod diagnostics;
 mod observability;
 mod paths;
 mod schema;
@@ -17,9 +18,11 @@ mod users;
 mod wireguard;
 
 pub use crate::state_model::{
-    CertificateRow, HealthCheckRow, HealthRecord, OutboundCertificateState,
-    OutboundCertificateUpdate, ProtonSessionState, RuntimeEventRow, UserRow, WireGuardEndpointRow,
-    WireGuardEndpointState, WireGuardEndpointStateUpdate,
+    CertificateRow, ConfigDeploymentRow, ForeignKeyViolationRow, HealthCheckRow, HealthRecord,
+    OutboundCertificateState, OutboundCertificateUpdate, PersistenceIntegrityReport,
+    PersistenceSummary, PersistenceTableSummary, ProtonCookieRow, ProtonSessionRow,
+    ProtonSessionState, RuntimeEventRow, UserRow, WireGuardEndpointRow, WireGuardEndpointState,
+    WireGuardEndpointStateUpdate,
 };
 pub use paths::{state_db_file, topology_state_file, username_state_key, write_state_file};
 

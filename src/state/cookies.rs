@@ -11,7 +11,7 @@ use super::cookies_support::{
     path_matches,
 };
 use super::support::unix_timestamp;
-use super::{StateStore, username_state_key};
+use super::{ProtonCookieRow, StateStore, username_state_key};
 
 #[derive(Clone, Debug)]
 struct PersistedCookie {
@@ -82,6 +82,37 @@ impl StateStore {
         self.connection
             .execute("DELETE FROM proton_cookies", [])
             .map_err(Into::into)
+    }
+
+    pub fn list_proton_cookies(&self, limit: usize) -> Result<Vec<ProtonCookieRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT c.username_key, a.username, c.cookie_name, c.cookie_domain, c.cookie_path,
+                    c.cookie_value, c.host_only, c.secure, c.http_only, c.same_site,
+                    c.expires_at_ms, c.created_at, c.updated_at
+             FROM proton_cookies c
+               LEFT JOIN users a ON a.username_key = c.username_key
+             ORDER BY c.updated_at DESC, a.username ASC, c.cookie_domain ASC,
+                      c.cookie_path ASC, c.cookie_name ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            Ok(ProtonCookieRow {
+                username_key: row.get(0)?,
+                username: row.get(1)?,
+                cookie_name: row.get(2)?,
+                cookie_domain: row.get(3)?,
+                cookie_path: row.get(4)?,
+                cookie_value: row.get(5)?,
+                host_only: row.get::<_, i64>(6)? != 0,
+                secure: row.get::<_, i64>(7)? != 0,
+                http_only: row.get::<_, i64>(8)? != 0,
+                same_site: row.get(9)?,
+                expires_at_ms: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })?;
+        super::support::collect_rows(rows)
     }
 
     pub fn record_proton_set_cookies(

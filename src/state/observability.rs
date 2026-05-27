@@ -1,7 +1,10 @@
 use rusqlite::params;
 
 use super::support::{collect_rows, unix_timestamp};
-use super::{HealthCheckRow, HealthRecord, RuntimeEventRow, StateStore, username_state_key};
+use super::{
+    ConfigDeploymentRow, HealthCheckRow, HealthRecord, RuntimeEventRow, StateStore,
+    username_state_key,
+};
 
 impl StateStore {
     pub fn record_event(
@@ -74,6 +77,31 @@ impl StateStore {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn list_config_deployments(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ConfigDeploymentRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, deployed_at, config_hash, outbound_tags_json, active_config,
+                    success, error
+             FROM config_deployments
+             ORDER BY deployed_at DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            Ok(ConfigDeploymentRow {
+                id: row.get(0)?,
+                deployed_at: row.get(1)?,
+                config_hash: row.get(2)?,
+                outbound_tags_json: row.get(3)?,
+                active_config: row.get(4)?,
+                success: row.get::<_, i64>(5)? != 0,
+                error: row.get(6)?,
+            })
+        })?;
+        collect_rows(rows)
     }
 
     pub fn list_events(&self, limit: usize) -> anyhow::Result<Vec<RuntimeEventRow>> {

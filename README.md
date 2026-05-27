@@ -56,6 +56,8 @@ Certificate and key state is stored per endpoint in `pso.sqlite3`. PSO requests 
 Use the grouped subcommands for setup and troubleshooting:
 
 - `auth login` and `auth refresh` manage configured or explicit Proton username session state.
+- `debug auth login` runs the auth login flow with verbose Proton HTTP tracing.
+- `debug db summary`, `debug db check`, and `debug db dump --limit 50` inspect the SQLite persistence layer, including sessions, cookies, deployments, and the other state tables.
 - `topology fetch` updates topology state.
 - `render` runs the same provisioning and render path as `run`, but exits after one converged deployment.
 - `health baseline` and `health probe` inspect IP behavior.
@@ -212,9 +214,13 @@ pso --state-dir /var/lib/pso state certs --limit 100
 pso --state-dir /var/lib/pso state wireguard --limit 100
 pso --state-dir /var/lib/pso state events --limit 100
 pso --state-dir /var/lib/pso state health --limit 100 --json
+pso --state-dir /var/lib/pso state cookies clear --username alice@example.com
+pso --state-dir /var/lib/pso debug db summary
+pso --state-dir /var/lib/pso debug db dump --limit 100
 ```
 
 `state users` shows known Proton username keys, usernames, and whether a stored Proton session exists. `state certs` shows Proton certificate metadata, stored profile identifier, selected server, endpoint address, assigned tunnel IP, refresh/expiration times, and failure count without printing private keys. `state wireguard` shows provider-agnostic WireGuard endpoint state for Proton and static providers without printing private keys. `state events` shows runtime events such as session updates, refresh-failure fallback re-logins, and health-triggered certificate extension outcomes. `state health` shows probe history with raw IP, returned IP, status, and reason.
+`state cookies clear` deletes Proton cookies for one username or across all usernames. `debug db summary` prints row counts and latest timestamps for the SQLite tables, `debug db check` runs integrity checks, and `debug db dump` prints a full persistence snapshot.
 
 ## Containers
 

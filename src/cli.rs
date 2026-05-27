@@ -37,6 +37,7 @@ pub struct DebugArgs {
 #[derive(Debug, Subcommand)]
 pub enum DebugCommand {
     Auth(DebugAuthArgs),
+    Db(DebugDbArgs),
 }
 
 #[derive(Debug, Args)]
@@ -48,6 +49,25 @@ pub struct DebugAuthArgs {
 #[derive(Debug, Subcommand)]
 pub enum DebugAuthCommand {
     Login(LoginArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DebugDbArgs {
+    #[command(subcommand)]
+    pub command: DebugDbCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DebugDbCommand {
+    Summary,
+    Check,
+    Dump(DebugDbDumpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DebugDbDumpArgs {
+    #[arg(long, default_value = "50")]
+    pub limit: usize,
 }
 
 #[derive(Debug, Args)]

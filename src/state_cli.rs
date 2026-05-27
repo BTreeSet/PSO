@@ -21,7 +21,7 @@ pub fn run_state(context: &RuntimeContext, args: StateArgs) -> Result<()> {
     }
 }
 
-fn print_users(rows: &[UserRow]) -> Result<()> {
+pub(crate) fn print_users(rows: &[UserRow]) -> Result<()> {
     println!("updated_at\tusername_key\thas_proton_session\tusername");
     for row in rows {
         println!(
@@ -35,7 +35,7 @@ fn print_users(rows: &[UserRow]) -> Result<()> {
     Ok(())
 }
 
-fn print_events(rows: &[RuntimeEventRow], args: &StateListArgs) -> Result<()> {
+pub(crate) fn print_events(rows: &[RuntimeEventRow], args: &StateListArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(rows)?);
         return Ok(());
@@ -56,7 +56,7 @@ fn print_events(rows: &[RuntimeEventRow], args: &StateListArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_certs(rows: &[CertificateRow], args: &StateListArgs) -> Result<()> {
+pub(crate) fn print_certs(rows: &[CertificateRow], args: &StateListArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(rows)?);
         return Ok(());
@@ -88,7 +88,7 @@ fn print_certs(rows: &[CertificateRow], args: &StateListArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_wireguard(rows: &[WireGuardEndpointRow], args: &StateListArgs) -> Result<()> {
+pub(crate) fn print_wireguard(rows: &[WireGuardEndpointRow], args: &StateListArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(rows)?);
         return Ok(());
@@ -132,7 +132,7 @@ fn print_wireguard(rows: &[WireGuardEndpointRow], args: &StateListArgs) -> Resul
     Ok(())
 }
 
-fn print_health(rows: &[HealthCheckRow], args: &StateListArgs) -> Result<()> {
+pub(crate) fn print_health(rows: &[HealthCheckRow], args: &StateListArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(rows)?);
         return Ok(());

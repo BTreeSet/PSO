@@ -36,6 +36,70 @@ pub struct HealthCheckRow {
     pub reason: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct PersistenceTableSummary {
+    pub table: &'static str,
+    pub row_count: i64,
+    pub latest_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ForeignKeyViolationRow {
+    pub table: String,
+    pub rowid: Option<i64>,
+    pub parent: String,
+    pub fkid: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PersistenceIntegrityReport {
+    pub integrity_check: Vec<String>,
+    pub foreign_key_violations: Vec<ForeignKeyViolationRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PersistenceSummary {
+    pub foreign_keys_enabled: bool,
+    pub tables: Vec<PersistenceTableSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProtonSessionRow {
+    pub username_key: String,
+    pub username: String,
+    pub uid: String,
+    pub refresh_token: String,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProtonCookieRow {
+    pub username_key: String,
+    pub username: String,
+    pub cookie_name: String,
+    pub cookie_domain: String,
+    pub cookie_path: String,
+    pub cookie_value: String,
+    pub host_only: bool,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: Option<String>,
+    pub expires_at_ms: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfigDeploymentRow {
+    pub id: i64,
+    pub deployed_at: i64,
+    pub config_hash: String,
+    pub outbound_tags_json: String,
+    pub active_config: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct OutboundCertificateState {
     pub outbound_tag: String,
