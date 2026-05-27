@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use pso::accounts::{ProtonAccount, ProtonAccountRegistry, require_single_account_access_token};
-use pso::api::{ProtonAccessToken, ProtonApiClient};
+use pso::api::{AuthTokens, ProtonAccessToken, ProtonApiClient};
 use pso::cli::{
     AuthCommand, Cli, Command, ControlPlaneArgs, DebugAuthCommand, DebugCommand, FetchLogicalsArgs,
     HealthCommand, LoginArgs, ProbeArgs, ProviderListArgs, ProvidersArgs, ProvidersCommand,
@@ -20,8 +20,8 @@ use pso::health::HealthMonitor;
 use pso::model::{PhysicalServer, ProtonLogicalResponse};
 use pso::process::{find_process_pid, find_process_pid_by_exe};
 use pso::proton::{
-    CachedAccessToken, login_configured_account, login_with_prompts, persist_proton_session,
-    refresh_stored_proton_session,
+    CachedAccessToken, ConfiguredLoginOptions, login_configured_account, login_with_prompts,
+    persist_proton_session, refresh_stored_proton_session,
 };
 use pso::provider::known_wireguard_providers;
 use pso::state::{StateStore, topology_state_file, write_state_file};
@@ -319,43 +319,103 @@ async fn login(
     debug_http: bool,
 ) -> Result<()> {
     let registry = ProtonAccountRegistry::from_auth(config)?;
-    let human_verification_token = args.human_verification_token.clone();
-    let session = if let Some(account_name) = args.account.as_deref() {
-        let account = registry.get_required(account_name)?;
-        ensure_username_matches_account(args.username.as_deref(), account)?;
-        let session = login_configured_account(
-            context,
-            account,
-            args.password,
-            args.totp,
-            human_verification_token.clone(),
+    let LoginArgs {
+        account,
+        username,
+        password,
+        password_file,
+        no_prompt,
+        totp,
+        human_verification_token,
+        output,
+    } = args;
+    let password_supplied = password.is_some() || password_file.is_some();
+    let configured_login_options =
+        |human_verification_token: Option<String>| ConfiguredLoginOptions {
+            password_override: password.clone(),
+            password_file_override: password_file.clone(),
+            totp_override: totp.clone(),
+            no_prompt_override: no_prompt,
+            human_verification_token,
             debug_http,
-        )
-        .await?;
-        persist_proton_session(context, &account.username, None, &session)?;
-        session
-    } else if let Some(username) = args.username {
-        if let Some(account) = registry.get_by_username(&username) {
+        };
+    let session = if let Some(account_name) = account.as_deref() {
+        let account = registry.get_required(account_name)?;
+        ensure_username_matches_account(username.as_deref(), account)?;
+        if !password_supplied {
+            if let Some(session) =
+                refresh_stored_login_session(context, &account.username, debug_http).await?
+            {
+                session
+            } else {
+                let session = login_configured_account(
+                    context,
+                    account,
+                    configured_login_options(human_verification_token.clone()),
+                )
+                .await?;
+                persist_proton_session(context, &account.username, None, &session)?;
+                session
+            }
+        } else {
             let session = login_configured_account(
                 context,
                 account,
-                args.password,
-                args.totp,
-                human_verification_token.clone(),
-                debug_http,
+                configured_login_options(human_verification_token.clone()),
+            )
+            .await?;
+            persist_proton_session(context, &account.username, None, &session)?;
+            session
+        }
+    } else if let Some(username) = username {
+        if !password_supplied {
+            if let Some(session) =
+                refresh_stored_login_session(context, &username, debug_http).await?
+            {
+                session
+            } else if let Some(account) = registry.get_by_username(&username) {
+                let session = login_configured_account(
+                    context,
+                    account,
+                    configured_login_options(human_verification_token.clone()),
+                )
+                .await?;
+                persist_proton_session(context, &account.username, None, &session)?;
+                session
+            } else {
+                let password =
+                    resolve_cli_password(password.clone(), password_file.clone(), no_prompt)?;
+                let session = login_with_prompts(
+                    context,
+                    &username,
+                    password,
+                    totp,
+                    no_prompt,
+                    human_verification_token,
+                    debug_http,
+                )
+                .await?;
+                persist_proton_session(context, &username, None, &session)?;
+                session
+            }
+        } else if let Some(account) = registry.get_by_username(&username) {
+            let session = login_configured_account(
+                context,
+                account,
+                configured_login_options(human_verification_token.clone()),
             )
             .await?;
             persist_proton_session(context, &account.username, None, &session)?;
             session
         } else {
-            let password = resolve_cli_password(args.password, args.password_file, args.no_prompt)?;
+            let password = resolve_cli_password(password, password_file, no_prompt)?;
             let session = login_with_prompts(
                 context,
                 &username,
                 password,
-                args.totp,
-                args.no_prompt,
-                human_verification_token.clone(),
+                totp,
+                no_prompt,
+                human_verification_token,
                 debug_http,
             )
             .await?;
@@ -367,22 +427,36 @@ async fn login(
             .iter()
             .next()
             .context("missing configured Proton account")?;
-        let session = login_configured_account(
-            context,
-            account,
-            args.password,
-            args.totp,
-            human_verification_token,
-            debug_http,
-        )
-        .await?;
-        persist_proton_session(context, &account.username, None, &session)?;
-        session
+        if !password_supplied {
+            if let Some(session) =
+                refresh_stored_login_session(context, &account.username, debug_http).await?
+            {
+                session
+            } else {
+                let session = login_configured_account(
+                    context,
+                    account,
+                    configured_login_options(human_verification_token.clone()),
+                )
+                .await?;
+                persist_proton_session(context, &account.username, None, &session)?;
+                session
+            }
+        } else {
+            let session = login_configured_account(
+                context,
+                account,
+                configured_login_options(human_verification_token),
+            )
+            .await?;
+            persist_proton_session(context, &account.username, None, &session)?;
+            session
+        }
     } else {
         anyhow::bail!("a Proton account is required; pass --account or --username")
     };
 
-    if let Some(output) = args.output {
+    if let Some(output) = output {
         write_json_output(&output, &session)?;
     } else {
         println!("{}", serde_json::to_string_pretty(&session)?);
@@ -418,7 +492,7 @@ async fn refresh_vpn_token(
         .as_deref()
         .map(|account| format!("pso auth login --account {account}"))
         .unwrap_or_else(|| format!("pso auth login --username {username}"));
-    let refreshed = refresh_stored_proton_session(context, &state)
+    let refreshed = refresh_stored_proton_session(context, &state, false)
         .await
         .with_context(|| {
             format!(
@@ -434,6 +508,32 @@ async fn refresh_vpn_token(
     }
 
     Ok(())
+}
+
+async fn refresh_stored_login_session(
+    context: &RuntimeContext,
+    username: &str,
+    debug_http: bool,
+) -> Result<Option<AuthTokens>> {
+    let store = StateStore::open(context)?;
+    let Some(state) = store.load_proton_session_optional(username)? else {
+        return Ok(None);
+    };
+
+    let refreshed = match refresh_stored_proton_session(context, &state, debug_http).await {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            if debug_http {
+                eprintln!(
+                    "[pso-debug] stored Proton session for {username} could not be refreshed; falling back to password login: {error:#}"
+                );
+            }
+            return Ok(None);
+        }
+    };
+
+    persist_proton_session(context, username, Some(&state.uid), &refreshed)?;
+    Ok(Some(refreshed))
 }
 
 fn ensure_username_matches_account(username: Option<&str>, account: &ProtonAccount) -> Result<()> {

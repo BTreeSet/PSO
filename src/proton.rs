@@ -1,4 +1,6 @@
+use std::fs;
 use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose};
@@ -26,6 +28,16 @@ pub struct CachedAccessToken {
 enum SessionLoginReason {
     MissingStoredSession,
     RefreshFailure,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConfiguredLoginOptions {
+    pub password_override: Option<String>,
+    pub password_file_override: Option<PathBuf>,
+    pub totp_override: Option<String>,
+    pub no_prompt_override: bool,
+    pub human_verification_token: Option<String>,
+    pub debug_http: bool,
 }
 
 impl CachedAccessToken {
@@ -156,34 +168,23 @@ pub async fn login_with_prompts(
 pub async fn login_configured_account(
     context: &RuntimeContext,
     account: &ProtonAccount,
-    password_override: Option<String>,
-    totp_override: Option<String>,
-    human_verification_token: Option<String>,
-    debug_http: bool,
+    options: ConfiguredLoginOptions,
 ) -> Result<AuthTokens> {
-    let password = match password_override {
-        Some(password) => password,
-        None => match account.password_from_config()? {
-            Some(password) => password,
-            None if !account.no_prompt => rpassword::prompt_password(format!(
-                "Proton password for {}: ",
-                account.display_name()
-            ))?,
-            None => bail!(
-                "password is required for Proton account '{}'; set password, password_file, or disable no_prompt for interactive login",
-                account.name
-            ),
-        },
-    };
+    let password = resolve_configured_account_password(
+        account,
+        options.password_override,
+        options.password_file_override,
+        options.no_prompt_override,
+    )?;
 
     login_with_prompts(
         context,
         &account.username,
         password,
-        totp_override.or_else(|| account.totp.clone()),
-        account.no_prompt,
-        human_verification_token,
-        debug_http,
+        options.totp_override.or_else(|| account.totp.clone()),
+        account.no_prompt || options.no_prompt_override,
+        options.human_verification_token,
+        options.debug_http,
     )
     .await
 }
@@ -241,8 +242,13 @@ fn human_verification_headless_error(challenge: &HumanVerificationChallenge) -> 
 pub async fn refresh_stored_proton_session(
     context: &RuntimeContext,
     state: &ProtonSessionState,
+    debug_http: bool,
 ) -> Result<AuthTokens> {
-    let api = ProtonApiClient::from_context(context)?;
+    let api = if debug_http {
+        ProtonApiClient::from_context_with_debug(context, true)?
+    } else {
+        ProtonApiClient::from_context(context)?
+    };
     api.refresh_session(&state.uid, &state.refresh_token).await
 }
 
@@ -256,6 +262,36 @@ pub fn persist_proton_session(
     store_tokens_in_state(&store, username, state_uid, tokens)
 }
 
+fn resolve_configured_account_password(
+    account: &ProtonAccount,
+    password_override: Option<String>,
+    password_file_override: Option<PathBuf>,
+    no_prompt_override: bool,
+) -> Result<String> {
+    match password_override {
+        Some(password) => Ok(password),
+        None => match password_file_override {
+            Some(path) => Ok(fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?
+                .trim_end_matches(['\r', '\n'])
+                .to_string()),
+            None => match account.password_from_config()? {
+                Some(password) => Ok(password),
+                None if !(no_prompt_override || account.no_prompt) => {
+                    Ok(rpassword::prompt_password(format!(
+                        "Proton password for {}: ",
+                        account.display_name()
+                    ))?)
+                }
+                None => bail!(
+                    "password is required for Proton account '{}'; set password, password_file, or disable no_prompt for interactive login",
+                    account.name
+                ),
+            },
+        },
+    }
+}
+
 pub async fn ensure_account_access_token(
     context: &RuntimeContext,
     account: &ProtonAccount,
@@ -267,7 +303,7 @@ pub async fn ensure_account_access_token(
 
     let store = StateStore::open(context)?;
     match store.load_proton_session_optional(&account.username)? {
-        Some(state) => match refresh_stored_proton_session(context, &state).await {
+        Some(state) => match refresh_stored_proton_session(context, &state, false).await {
             Ok(tokens) => {
                 store_tokens_in_state(&store, &account.username, Some(&state.uid), &tokens)?;
                 cache.store(&tokens, Some(&state.uid));
@@ -344,9 +380,20 @@ async fn login_and_store_account_access_token(
             .with_context(|| headless_relogin_error(account, reason, refresh_error))?;
     }
 
-    let tokens = login_configured_account(context, account, None, None, None, false)
-        .await
-        .with_context(|| login_error_context(account, reason, refresh_error))?;
+    let tokens = login_configured_account(
+        context,
+        account,
+        ConfiguredLoginOptions {
+            password_override: None,
+            password_file_override: None,
+            totp_override: None,
+            no_prompt_override: false,
+            human_verification_token: None,
+            debug_http: false,
+        },
+    )
+    .await
+    .with_context(|| login_error_context(account, reason, refresh_error))?;
     let store = StateStore::open(context)?;
     store_tokens_in_state(&store, &account.username, fallback_uid, &tokens)?;
     cache.store(&tokens, fallback_uid);
@@ -499,5 +546,48 @@ mod tests {
         cache.store(&tokens, None);
 
         assert!(cache.fresh_token().is_none());
+    }
+
+    #[test]
+    fn configured_account_password_prefers_password_file_override() {
+        let password_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(password_file.path(), "from-file\n").unwrap();
+
+        let account = ProtonAccount {
+            name: "example".into(),
+            username: "example@example.com".into(),
+            tier: "vpn".into(),
+            password: Some("from-config".into()),
+            password_file: None,
+            totp: None,
+            no_prompt: false,
+        };
+
+        let password = resolve_configured_account_password(
+            &account,
+            None,
+            Some(password_file.path().to_path_buf()),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(password, "from-file");
+    }
+
+    #[test]
+    fn configured_account_password_respects_no_prompt_override() {
+        let account = ProtonAccount {
+            name: "example".into(),
+            username: "example@example.com".into(),
+            tier: "vpn".into(),
+            password: None,
+            password_file: None,
+            totp: None,
+            no_prompt: false,
+        };
+
+        let error = resolve_configured_account_password(&account, None, None, true).unwrap_err();
+
+        assert!(error.to_string().contains("password is required"));
     }
 }
