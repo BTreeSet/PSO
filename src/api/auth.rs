@@ -1,11 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum LoginIntent {
+    Auto,
+    Proton,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct LoginInfoBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    pub intent: String,
+    pub intent: LoginIntent,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -45,6 +52,8 @@ pub struct LoginBody {
     pub client_proof: String,
     #[serde(rename = "SRPSession")]
     pub srp_session: String,
+    #[serde(rename = "Payload", skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub two_factor_code: Option<String>,
 }
@@ -151,11 +160,18 @@ mod tests {
     fn serializes_login_and_auth_followup_bodies_like_proton_client() {
         let login_info = serde_json::to_value(LoginInfoBody {
             username: Some("alice@example.com".into()),
-            intent: "Auto".into(),
+            intent: LoginIntent::Auto,
         })
         .unwrap();
         assert_eq!(login_info["Username"], "alice@example.com");
         assert_eq!(login_info["Intent"], "Auto");
+
+        let proton_login_info = serde_json::to_value(LoginInfoBody {
+            username: Some("alice@example.com".into()),
+            intent: LoginIntent::Proton,
+        })
+        .unwrap();
+        assert_eq!(proton_login_info["Intent"], "Proton");
 
         let login = serde_json::to_value(LoginBody {
             username: "alice@example.com".into(),
@@ -163,11 +179,15 @@ mod tests {
             client_ephemeral: "client-ephemeral".into(),
             client_proof: "client-proof".into(),
             srp_session: "srp-session".into(),
+            payload: Some(json!({
+                "opaque": "browser-payload"
+            })),
             two_factor_code: Some("123456".into()),
         })
         .unwrap();
         assert_eq!(login["PersistentCookies"], 1);
         assert_eq!(login["SRPSession"], "srp-session");
+        assert_eq!(login["Payload"]["opaque"], "browser-payload");
         assert_eq!(login["TwoFactorCode"], "123456");
 
         let refresh = serde_json::to_value(RefreshSessionBody {
@@ -191,6 +211,25 @@ mod tests {
         assert_eq!(fork["Payload"], "payload");
         assert_eq!(fork["Independent"], 1);
         assert_eq!(fork["UserCode"], "code");
+    }
+
+    #[test]
+    fn deserializes_pre_auth_session_and_code_response_shapes() {
+        let session: PreAuthSession = serde_json::from_value(json!({
+            "AccessToken": "access-token",
+            "RefreshToken": "refresh-token",
+            "UID": "uid-123"
+        }))
+        .unwrap();
+        assert_eq!(session.access_token, "access-token");
+        assert_eq!(session.refresh_token, "refresh-token");
+        assert_eq!(session.uid, "uid-123");
+
+        let code: ApiCodeResponse = serde_json::from_value(json!({
+            "Code": 1000
+        }))
+        .unwrap();
+        assert_eq!(code.code, Some(1000));
     }
 
     #[test]
@@ -222,6 +261,12 @@ mod tests {
 
         assert!(response.requires_two_factor());
         assert!(response.supports_totp());
+
+        let two_factor = serde_json::to_value(LoginTwoFactorBody {
+            two_factor_code: "123456".into(),
+        })
+        .unwrap();
+        assert_eq!(two_factor["TwoFactorCode"], "123456");
     }
 
     #[test]

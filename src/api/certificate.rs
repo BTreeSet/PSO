@@ -118,6 +118,7 @@ pub struct SessionLocalKeyBody {
 #[serde(rename_all = "PascalCase")]
 pub struct SessionPayloadBody {
     pub payload: serde_json::Value,
+    pub persistent_cookies: u8,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -339,12 +340,14 @@ mod tests {
             payload: json!({
                 ".-77VX-aP0iPqoI": "dumb-encrypted-payload"
             }),
+            persistent_cookies: 1,
         })
         .unwrap();
         assert_eq!(
             payload["Payload"][".-77VX-aP0iPqoI"],
             "dumb-encrypted-payload"
         );
+        assert_eq!(payload["PersistentCookies"], 1);
     }
 
     #[test]

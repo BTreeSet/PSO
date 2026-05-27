@@ -19,14 +19,14 @@ use http::{
 
 pub use auth::{
     ApiCodeResponse, AuthResponse, AuthTokens, LoginBody, LoginInfoBody, LoginInfoResponse,
-    LoginTwoFactorBody, PreAuthSession, TwoFactorState,
+    LoginIntent, LoginTwoFactorBody, PreAuthSession, TwoFactorState,
 };
 pub use certificate::{
     CertificateFeatures, CertificateListResponse, CertificateRequest, CertificateResponse,
     PersistentCertificateFeatures, SessionLocalKeyBody, SessionPayloadBody,
 };
 pub use human_verification::HumanVerificationChallenge;
-pub use session::{RefreshSessionBody, SessionForkBody};
+pub use session::{AuthCookiesBody, RefreshSessionBody, SessionForkBody};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtonAccessToken {
@@ -175,7 +175,10 @@ impl ProtonApiClient {
         payload: serde_json::Value,
     ) -> Result<ApiCodeResponse> {
         let url = self.api_url("auth/v4/sessions/payload");
-        let request = SessionPayloadBody { payload };
+        let request = SessionPayloadBody {
+            payload,
+            persistent_cookies: 1,
+        };
         send_json_with_retry(
             || {
                 with_browser_origin_headers(
@@ -258,12 +261,13 @@ impl ProtonApiClient {
         &self,
         session: &PreAuthSession,
         username: &str,
+        intent: LoginIntent,
         human_verification_token: Option<&str>,
     ) -> Result<LoginInfoResponse> {
         let url = self.api_url("core/v4/auth/info");
         let request = LoginInfoBody {
             username: Some(username.to_string()),
-            intent: "Auto".into(),
+            intent,
         };
         send_json_with_retry(
             || {
@@ -303,6 +307,7 @@ impl ProtonApiClient {
             client_ephemeral: srp.client_ephemeral.clone(),
             client_proof: srp.client_proof.clone(),
             srp_session: srp_session.to_string(),
+            payload: None,
             two_factor_code: two_factor_code.map(ToOwned::to_owned),
         };
         send_json_with_retry(
@@ -399,6 +404,27 @@ impl ProtonApiClient {
         )
         .await
         .context("Proton auth refresh request failed")
+    }
+
+    pub async fn auth_cookies(
+        &self,
+        uid: &str,
+        access_token: &str,
+        request: &AuthCookiesBody,
+    ) -> Result<ApiCodeResponse> {
+        let url = self.api_url("core/v4/auth/cookies");
+        send_json_with_retry(
+            || {
+                with_browser_origin_headers(
+                    self.with_auth_headers(self.client.post(&url), uid, access_token),
+                    BROWSER_LOGIN_REFERER,
+                )
+                .json(request)
+            },
+            self.debug_http,
+        )
+        .await
+        .context("Proton auth cookies request failed")
     }
 
     fn api_url(&self, path: &str) -> String {

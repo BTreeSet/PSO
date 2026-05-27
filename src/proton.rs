@@ -7,7 +7,9 @@ use base64::{Engine as _, engine::general_purpose};
 use serde_json::json;
 use tracing::warn;
 
-use crate::api::{AuthTokens, HumanVerificationChallenge, ProtonAccessToken, ProtonApiClient};
+use crate::api::{
+    AuthTokens, HumanVerificationChallenge, LoginIntent, ProtonAccessToken, ProtonApiClient,
+};
 use crate::auth::{calculate_srp_proof, resolve_two_factor_code};
 use crate::config::RuntimeContext;
 use crate::state::{ProtonSessionState, StateStore};
@@ -75,10 +77,16 @@ pub async fn login_with_prompts(
     } else {
         ProtonApiClient::from_context(context)?
     };
+    let mut login_intent = LoginIntent::Auto;
     let bootstrap = api.create_unauth_session().await?;
     let info = loop {
         match api
-            .auth_info(&bootstrap, username, human_verification_token.as_deref())
+            .auth_info(
+                &bootstrap,
+                username,
+                login_intent,
+                human_verification_token.as_deref(),
+            )
             .await
         {
             Ok(info) => break info,
@@ -87,6 +95,7 @@ pub async fn login_with_prompts(
                     Some(challenge) => challenge.clone(),
                     None => return Err(error),
                 };
+                login_intent = LoginIntent::Proton;
                 human_verification_token =
                     Some(prompt_human_verification_token(&challenge, no_prompt)?);
             }
