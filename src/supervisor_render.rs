@@ -6,7 +6,6 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use crate::accounts::ProtonAccountRegistry;
 use crate::config::{RenderConfig, RuntimeContext};
 use crate::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use crate::filter::ServerFilter;
@@ -18,6 +17,7 @@ use crate::state::{StateStore, WireGuardEndpointState};
 use crate::supervisor::{
     EndpointSpec, ProtonEndpointSpec, StaticWireGuardEndpointSpec, SupervisorRuntime,
 };
+use crate::users::ProtonUserRegistry;
 
 pub(crate) async fn render_and_deploy(runtime: &SupervisorRuntime) -> Result<()> {
     let rendered = render_from_state(&runtime.template, &runtime.context, &runtime.specs)?;
@@ -150,11 +150,10 @@ fn parse_proton_spec(
     tag: String,
     health_proxy_url: Option<String>,
 ) -> Result<ProtonEndpointSpec> {
-    let account = object
-        .get("account")
-        .or_else(|| object.get("user"))
+    let username = object
+        .get("username")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("proton wireguard entry {tag} is missing account"))?
+        .ok_or_else(|| anyhow!("proton wireguard entry {tag} is missing username"))?
         .to_string();
     let filter: ServerFilter = serde_json::from_value(
         object
@@ -166,7 +165,7 @@ fn parse_proton_spec(
 
     Ok(ProtonEndpointSpec {
         tag,
-        account,
+        username,
         filter,
         health_proxy_url,
     })
@@ -217,32 +216,31 @@ fn parse_static_spec(
     })
 }
 
-pub(crate) fn account_sessions(
-    registry: &ProtonAccountRegistry,
+pub(crate) fn proton_user_sessions(
+    registry: &ProtonUserRegistry,
 ) -> Result<BTreeMap<String, UserSession>> {
     if registry.is_empty() {
-        anyhow::bail!("Proton endpoints require auth.proton.accounts to declare account tiers")
+        anyhow::bail!("Proton endpoints require auth.proton.users to declare usernames and tiers")
     }
     Ok(registry.sessions())
 }
 
-pub(crate) fn canonicalize_proton_accounts(
-    specs: &mut [EndpointSpec],
-    registry: &ProtonAccountRegistry,
+pub(crate) fn validate_proton_user_bindings(
+    specs: &[EndpointSpec],
+    registry: &ProtonUserRegistry,
 ) -> Result<()> {
-    let mut assigned_accounts = BTreeSet::new();
+    let mut assigned_usernames = BTreeSet::new();
     for spec in specs {
         let EndpointSpec::Proton(spec) = spec else {
             continue;
         };
-        let account = registry.resolve_template_reference(&spec.account)?;
-        if !assigned_accounts.insert(account.name.clone()) {
+        let user = registry.get_required(&spec.username)?;
+        if !assigned_usernames.insert(user.username.clone()) {
             anyhow::bail!(
-                "Proton account '{}' is assigned to more than one endpoint; provision one account per active Proton endpoint",
-                account.name
+                "Proton username '{}' is assigned to more than one endpoint; provision one username per active Proton endpoint",
+                user.username
             );
         }
-        spec.account = account.name.clone();
     }
     Ok(())
 }
@@ -331,7 +329,7 @@ fn apply_wireguard_endpoint_state(
     let (peer_address, peer_port) = split_endpoint(&state.endpoint)?;
     object.remove("provider");
     object.remove("user");
-    object.remove("account");
+    object.remove("username");
     object.remove("identity");
     object.remove("filter");
     object.remove("health");

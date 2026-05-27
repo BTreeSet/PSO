@@ -7,8 +7,8 @@ pub struct ProtonSessionState {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct AccountRow {
-    pub account_key: String,
+pub struct UserRow {
+    pub username_key: String,
     pub username: String,
     pub updated_at: i64,
     pub has_proton_session: bool,

@@ -11,8 +11,8 @@ use crate::proton::PROTON_WIREGUARD_KEEPALIVE_INTERVAL;
 use crate::provider::PROTON_PROVIDER;
 use crate::singbox_adapter::default_allowed_ips;
 pub use crate::state_model::{
-    AccountRow, CertificateRow, HealthCheckRow, HealthRecord, OutboundCertificateState,
-    OutboundCertificateUpdate, ProtonSessionState, RuntimeEventRow, WireGuardEndpointRow,
+    CertificateRow, HealthCheckRow, HealthRecord, OutboundCertificateState,
+    OutboundCertificateUpdate, ProtonSessionState, RuntimeEventRow, UserRow, WireGuardEndpointRow,
     WireGuardEndpointState, WireGuardEndpointStateUpdate,
 };
 
@@ -36,17 +36,17 @@ impl StateStore {
         uid: &str,
         refresh_token: &str,
     ) -> Result<()> {
-        let account_key = user_state_key(username);
+        let username_key = username_state_key(username);
         let now = unix_timestamp()?;
-        self.upsert_account(&account_key, username, now)?;
+        self.upsert_user(&username_key, username, now)?;
         self.connection.execute(
-            "INSERT INTO vpn_sessions (account_key, uid, refresh_token, updated_at)
+            "INSERT INTO vpn_sessions (username_key, uid, refresh_token, updated_at)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(account_key) DO UPDATE SET
+             ON CONFLICT(username_key) DO UPDATE SET
                uid = excluded.uid,
                refresh_token = excluded.refresh_token,
                updated_at = excluded.updated_at",
-            params![account_key, uid, refresh_token, now],
+            params![username_key, uid, refresh_token, now],
         )?;
         self.record_event(Some(username), None, "proton_session_updated", None)
     }
@@ -55,11 +55,11 @@ impl StateStore {
         &self,
         username: &str,
     ) -> Result<Option<ProtonSessionState>> {
-        let account_key = user_state_key(username);
+        let username_key = username_state_key(username);
         self.connection
             .query_row(
-                "SELECT uid, refresh_token FROM vpn_sessions WHERE account_key = ?1",
-                params![account_key],
+                "SELECT uid, refresh_token FROM vpn_sessions WHERE username_key = ?1",
+                params![username_key],
                 |row| {
                     Ok(ProtonSessionState {
                         uid: row.get(0)?,
@@ -83,17 +83,17 @@ impl StateStore {
         event_type: &str,
         details_json: Option<&str>,
     ) -> Result<()> {
-        let account_key = username.map(user_state_key);
-        if let (Some(account_key), Some(username)) = (&account_key, username) {
-            self.upsert_account(account_key, username, unix_timestamp()?)?;
+        let username_key = username.map(username_state_key);
+        if let (Some(username_key), Some(username)) = (&username_key, username) {
+            self.upsert_user(username_key, username, unix_timestamp()?)?;
         }
         self.connection.execute(
             "INSERT INTO runtime_events
-               (occurred_at, account_key, outbound_tag, event_type, details_json)
+               (occurred_at, username_key, outbound_tag, event_type, details_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 unix_timestamp()?,
-                account_key,
+                username_key,
                 outbound_tag,
                 event_type,
                 details_json
@@ -103,17 +103,17 @@ impl StateStore {
     }
 
     pub fn record_health(&self, record: HealthRecord<'_>) -> Result<()> {
-        let account_key = record.username.map(user_state_key);
-        if let (Some(account_key), Some(username)) = (&account_key, record.username) {
-            self.upsert_account(account_key, username, unix_timestamp()?)?;
+        let username_key = record.username.map(username_state_key);
+        if let (Some(username_key), Some(username)) = (&username_key, record.username) {
+            self.upsert_user(username_key, username, unix_timestamp()?)?;
         }
         self.connection.execute(
             "INSERT INTO health_checks
-               (occurred_at, account_key, outbound_tag, status, raw_ip, returned_ip, reason)
+               (occurred_at, username_key, outbound_tag, status, raw_ip, returned_ip, reason)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 unix_timestamp()?,
-                account_key,
+                username_key,
                 record.outbound_tag,
                 record.status,
                 record.raw_ip,
@@ -228,17 +228,17 @@ impl StateStore {
         &self,
         update: OutboundCertificateUpdate<'_>,
     ) -> Result<()> {
-        let account_key = user_state_key(update.username);
+        let username_key = username_state_key(update.username);
         let now = unix_timestamp()?;
-        self.upsert_account(&account_key, update.username, now)?;
+        self.upsert_user(&username_key, update.username, now)?;
         self.connection.execute(
             "INSERT INTO outbound_certificates
-                             (outbound_tag, account_key, username, profile_id, server_id, server_name, endpoint,
+                             (outbound_tag, username_key, username, profile_id, server_id, server_name, endpoint,
                 peer_public_key, private_key, public_key, assigned_ip, expires_at_ms,
                 refresh_at_ms, consecutive_failures, last_error, updated_at)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, NULL, ?14)
              ON CONFLICT(outbound_tag) DO UPDATE SET
-               account_key = excluded.account_key,
+               username_key = excluded.username_key,
                username = excluded.username,
                              profile_id = COALESCE(excluded.profile_id, outbound_certificates.profile_id),
                server_id = excluded.server_id,
@@ -255,7 +255,7 @@ impl StateStore {
                updated_at = excluded.updated_at",
             params![
                 update.outbound_tag,
-                account_key,
+                username_key,
                 update.username,
                 update.profile_id,
                 update.server_id,
@@ -305,9 +305,9 @@ impl StateStore {
         outbound_tag: &str,
         error: &str,
     ) -> Result<()> {
-        let account_key = user_state_key(username);
+        let username_key = username_state_key(username);
         let now = unix_timestamp()?;
-        self.upsert_account(&account_key, username, now)?;
+        self.upsert_user(&username_key, username, now)?;
         self.connection.execute(
             "UPDATE outbound_certificates
              SET consecutive_failures = consecutive_failures + 1,
@@ -350,16 +350,16 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn list_accounts(&self) -> Result<Vec<AccountRow>> {
+    pub fn list_users(&self) -> Result<Vec<UserRow>> {
         let mut statement = self.connection.prepare(
-            "SELECT a.account_key, a.username, a.updated_at, s.account_key IS NOT NULL
-             FROM accounts a
-             LEFT JOIN vpn_sessions s ON s.account_key = a.account_key
+            "SELECT a.username_key, a.username, a.updated_at, s.username_key IS NOT NULL
+             FROM users a
+             LEFT JOIN vpn_sessions s ON s.username_key = a.username_key
              ORDER BY a.updated_at DESC, a.username ASC",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok(AccountRow {
-                account_key: row.get(0)?,
+            Ok(UserRow {
+                username_key: row.get(0)?,
                 username: row.get(1)?,
                 updated_at: row.get(2)?,
                 has_proton_session: row.get(3)?,
@@ -372,7 +372,7 @@ impl StateStore {
         let mut statement = self.connection.prepare(
             "SELECT e.id, e.occurred_at, a.username, e.outbound_tag, e.event_type, e.details_json
              FROM runtime_events e
-             LEFT JOIN accounts a ON a.account_key = e.account_key
+               LEFT JOIN users a ON a.username_key = e.username_key
              ORDER BY e.occurred_at DESC, e.id DESC
              LIMIT ?1",
         )?;
@@ -394,7 +394,7 @@ impl StateStore {
             "SELECT h.id, h.occurred_at, a.username, h.outbound_tag, h.status,
                     h.raw_ip, h.returned_ip, h.reason
              FROM health_checks h
-             LEFT JOIN accounts a ON a.account_key = h.account_key
+               LEFT JOIN users a ON a.username_key = h.username_key
              ORDER BY h.occurred_at DESC, h.id DESC
              LIMIT ?1",
         )?;
@@ -530,16 +530,20 @@ impl StateStore {
     }
 
     fn migrate(&self) -> Result<()> {
+        if self.legacy_state_schema_exists()? {
+            anyhow::bail!("legacy state database detected; delete pso.sqlite3 and log in again");
+        }
+
         self.connection.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS accounts (
-               account_key TEXT PRIMARY KEY,
+                         CREATE TABLE IF NOT EXISTS users (
+                             username_key TEXT PRIMARY KEY,
                username TEXT NOT NULL,
                updated_at INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS vpn_sessions (
-               account_key TEXT PRIMARY KEY REFERENCES accounts(account_key) ON DELETE CASCADE,
+                             username_key TEXT PRIMARY KEY REFERENCES users(username_key) ON DELETE CASCADE,
                uid TEXT NOT NULL,
                refresh_token TEXT NOT NULL,
                updated_at INTEGER NOT NULL
@@ -547,7 +551,7 @@ impl StateStore {
              CREATE TABLE IF NOT EXISTS runtime_events (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                occurred_at INTEGER NOT NULL,
-               account_key TEXT REFERENCES accounts(account_key) ON DELETE SET NULL,
+                             username_key TEXT REFERENCES users(username_key) ON DELETE SET NULL,
                outbound_tag TEXT,
                event_type TEXT NOT NULL,
                details_json TEXT
@@ -555,7 +559,7 @@ impl StateStore {
              CREATE TABLE IF NOT EXISTS health_checks (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                occurred_at INTEGER NOT NULL,
-               account_key TEXT REFERENCES accounts(account_key) ON DELETE SET NULL,
+                             username_key TEXT REFERENCES users(username_key) ON DELETE SET NULL,
                outbound_tag TEXT,
                status TEXT NOT NULL,
                raw_ip TEXT NOT NULL,
@@ -564,7 +568,7 @@ impl StateStore {
              );
                          CREATE TABLE IF NOT EXISTS outbound_certificates (
                              outbound_tag TEXT PRIMARY KEY,
-                             account_key TEXT NOT NULL REFERENCES accounts(account_key) ON DELETE CASCADE,
+                                                         username_key TEXT NOT NULL REFERENCES users(username_key) ON DELETE CASCADE,
                              username TEXT NOT NULL,
                              profile_id TEXT,
                              server_id TEXT NOT NULL,
@@ -609,12 +613,12 @@ impl StateStore {
                              refresh_at_ms INTEGER,
                              updated_at INTEGER NOT NULL
                          );
-             CREATE INDEX IF NOT EXISTS idx_events_account_time
-               ON runtime_events(account_key, occurred_at);
-             CREATE INDEX IF NOT EXISTS idx_health_account_outbound_time
-                             ON health_checks(account_key, outbound_tag, occurred_at);
-                         CREATE INDEX IF NOT EXISTS idx_certificates_account
-                             ON outbound_certificates(account_key, outbound_tag);
+                         CREATE INDEX IF NOT EXISTS idx_events_username_time
+                             ON runtime_events(username_key, occurred_at);
+                         CREATE INDEX IF NOT EXISTS idx_health_username_outbound_time
+                                                         ON health_checks(username_key, outbound_tag, occurred_at);
+                                                 CREATE INDEX IF NOT EXISTS idx_certificates_username
+                                                         ON outbound_certificates(username_key, outbound_tag);
                          CREATE INDEX IF NOT EXISTS idx_wireguard_provider
                              ON wireguard_endpoint_states(provider, updated_at);
                          CREATE INDEX IF NOT EXISTS idx_config_deployments_time
@@ -625,16 +629,38 @@ impl StateStore {
         Ok(())
     }
 
-    fn upsert_account(&self, account_key: &str, username: &str, updated_at: i64) -> Result<()> {
+    fn upsert_user(&self, username_key: &str, username: &str, updated_at: i64) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO accounts (account_key, username, updated_at)
+            "INSERT INTO users (username_key, username, updated_at)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(account_key) DO UPDATE SET
+             ON CONFLICT(username_key) DO UPDATE SET
                username = excluded.username,
                updated_at = excluded.updated_at",
-            params![account_key, username, updated_at],
+            params![username_key, username, updated_at],
         )?;
         Ok(())
+    }
+
+    fn legacy_state_schema_exists(&self) -> Result<bool> {
+        let users_exists = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if users_exists {
+            return Ok(false);
+        }
+
+        let legacy_sessions_exist = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vpn_sessions'
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(legacy_sessions_exist)
     }
 }
 
@@ -679,7 +705,7 @@ pub fn state_db_file(context: &RuntimeContext) -> PathBuf {
     context.state_dir.join("pso.sqlite3")
 }
 
-pub fn user_state_key(username: &str) -> String {
+pub fn username_state_key(username: &str) -> String {
     hex::encode(Sha256::digest(username.as_bytes()))
 }
 
@@ -704,7 +730,7 @@ mod tests {
 
     #[test]
     fn username_state_key_is_path_safe_and_opaque() {
-        let key = user_state_key("alice@example.com");
+        let key = username_state_key("alice@example.com");
         assert_eq!(key.len(), 64);
         assert!(key.chars().all(|character| character.is_ascii_hexdigit()));
         assert!(!key.contains("alice"));
@@ -769,6 +795,7 @@ mod tests {
         assert_eq!(cert.profile_id.as_deref(), Some("profile-1"));
         assert_eq!(cert.private_key, "private");
         assert_eq!(store.list_certificates(10).unwrap().len(), 1);
+        assert_eq!(store.list_users().unwrap().len(), 1);
 
         assert!(
             store

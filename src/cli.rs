@@ -81,7 +81,7 @@ pub struct StateArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum StateCommand {
-    Accounts,
+    Users,
     Certs(StateListArgs),
     Wireguard(StateListArgs),
     Events(StateListArgs),
@@ -176,7 +176,7 @@ pub struct ControlPlaneArgs {
     #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
     pub access_token: Option<String>,
     #[arg(long)]
-    pub account: Option<String>,
+    pub username: Option<String>,
     #[arg(long)]
     pub active_config: Option<PathBuf>,
     #[arg(long)]
@@ -196,7 +196,7 @@ pub struct FetchLogicalsArgs {
     #[arg(long, env = "PSO_PROTON_ACCESS_TOKEN")]
     pub access_token: Option<String>,
     #[arg(long)]
-    pub account: Option<String>,
+    pub username: Option<String>,
     #[arg(long, default_value = "proton-logicals.json")]
     pub output: PathBuf,
     #[arg(long)]
@@ -207,8 +207,6 @@ pub struct FetchLogicalsArgs {
 
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    #[arg(long)]
-    pub account: Option<String>,
     #[arg(long)]
     pub username: Option<String>,
     #[arg(long, env = "PSO_PROTON_PASSWORD")]
@@ -236,8 +234,6 @@ pub struct LoginArgs {
 
 #[derive(Debug, Args)]
 pub struct RefreshVpnTokenArgs {
-    #[arg(long)]
-    pub account: Option<String>,
     #[arg(long)]
     pub username: Option<String>,
     #[arg(long)]

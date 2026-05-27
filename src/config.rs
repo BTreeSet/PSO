@@ -78,31 +78,22 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn validate(&self) -> Result<()> {
-        let mut names = std::collections::BTreeSet::new();
         let mut usernames = std::collections::BTreeSet::new();
-        for account in &self.proton.accounts {
-            let name = account.name.trim();
-            if name.is_empty() {
-                bail!("auth.proton.accounts entries must have a non-empty name");
-            }
-            if !names.insert(name.to_string()) {
-                bail!("duplicate Proton account name '{name}'");
-            }
-
-            let username = account.username.trim();
+        for user in &self.proton.users {
+            let username = user.username.trim();
             if username.is_empty() {
-                bail!("auth.proton.accounts entry '{name}' must have a non-empty username");
+                bail!("auth.proton.users entries must have a non-empty username");
             }
             if !usernames.insert(username.to_string()) {
-                bail!("duplicate Proton username '{username}' in auth.proton.accounts");
+                bail!("duplicate Proton username '{username}' in auth.proton.users");
             }
 
-            if account.tier.trim().is_empty() {
-                bail!("auth.proton.accounts entry '{name}' must declare a tier");
+            if user.tier.trim().is_empty() {
+                bail!("auth.proton.users entry for '{username}' must declare a tier");
             }
-            if account.password.is_some() && account.password_file.is_some() {
+            if user.password.is_some() && user.password_file.is_some() {
                 bail!(
-                    "auth.proton.accounts entry '{name}' cannot set both password and password_file"
+                    "auth.proton.users entry for '{username}' cannot set both password and password_file"
                 );
             }
         }
@@ -117,13 +108,12 @@ pub struct ProtonAuthConfig {
     pub app_version: Option<String>,
     pub device_name: Option<String>,
     pub user_agent: Option<String>,
-    pub accounts: Vec<ProtonAccountConfig>,
+    pub users: Vec<ProtonUserConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct ProtonAccountConfig {
-    pub name: String,
+pub struct ProtonUserConfig {
     pub username: String,
     pub tier: String,
     pub password: Option<String>,
@@ -135,7 +125,7 @@ pub struct ProtonAccountConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TopologyConfig {
-    pub account: Option<String>,
+    pub username: Option<String>,
     pub country: Option<String>,
     pub netzone: Option<String>,
     pub fallback_topology: Option<PathBuf>,
@@ -157,7 +147,7 @@ pub struct RenderConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ControlPlaneDefaults {
-    pub account: Option<String>,
+    pub username: Option<String>,
     pub active_config: Option<PathBuf>,
     pub singbox_pid: Option<i32>,
     pub singbox_bin: Option<PathBuf>,
@@ -240,7 +230,7 @@ mod tests {
             app_version: Some("5.18.46.0+os".into()),
             device_name: Some("edge-router".into()),
             user_agent: Some("CustomAgent/1.0\n".into()),
-            accounts: Vec::new(),
+            users: Vec::new(),
         });
 
         assert_eq!(profile.client_id, "android_tv-vpn");

@@ -25,17 +25,17 @@ pub struct UserSession {
     pub username: String,
     pub access_token: String,
     pub refresh_token: String,
-    pub account_tier: String,
+    pub tier: String,
     pub active_connections: Vec<ActiveOutbound>,
 }
 
 impl UserSession {
-    pub fn new(username: impl Into<String>, account_tier: impl Into<String>) -> Self {
+    pub fn new(username: impl Into<String>, tier: impl Into<String>) -> Self {
         Self {
             username: username.into(),
             access_token: String::new(),
             refresh_token: String::new(),
-            account_tier: account_tier.into(),
+            tier: tier.into(),
             active_connections: Vec::new(),
         }
     }

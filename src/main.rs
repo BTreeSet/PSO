@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use pso::accounts::{ProtonAccount, ProtonAccountRegistry, require_single_account_access_token};
 use pso::api::{AuthTokens, ProtonAccessToken, ProtonApiClient};
 use pso::cli::{
     AuthCommand, Cli, Command, ControlPlaneArgs, DebugAuthCommand, DebugCommand, FetchLogicalsArgs,
@@ -20,12 +19,13 @@ use pso::health::HealthMonitor;
 use pso::model::{PhysicalServer, ProtonLogicalResponse};
 use pso::process::{find_process_pid, find_process_pid_by_exe};
 use pso::proton::{
-    CachedAccessToken, ConfiguredLoginOptions, login_configured_account, login_with_prompts,
+    CachedAccessToken, ConfiguredLoginOptions, login_configured_user, login_with_prompts,
     persist_proton_session, refresh_stored_proton_session,
 };
 use pso::provider::known_wireguard_providers;
 use pso::state::{StateStore, topology_state_file, write_state_file};
 use pso::supervisor::{SupervisorOptions, run_supervisor};
+use pso::users::{ProtonUserRegistry, require_single_user_access_token};
 
 mod state_cli;
 
@@ -201,9 +201,9 @@ async fn control_plane(
         .endpoint
         .or(config.endpoint.clone())
         .context("endpoint is required; pass --endpoint or set control_plane.endpoint")?;
-    let account = args.account.or(config.account.clone());
+    let username = args.username.or(config.username.clone());
     let access_token =
-        resolve_manual_access_token(context, auth, args.access_token, account.as_deref()).await?;
+        resolve_manual_access_token(context, auth, args.access_token, username.as_deref()).await?;
     let api = ProtonApiClient::from_context(context)?;
     let control_plane = ControlPlane::new(api);
     control_plane
@@ -244,9 +244,9 @@ async fn fetch_logicals(
 ) -> Result<()> {
     let api = ProtonApiClient::from_context(context)?;
     let state_logicals = topology_state_file(context);
-    let account = args.account.or(config.account.clone());
+    let username = args.username.or(config.username.clone());
     let access_token =
-        resolve_manual_access_token(context, auth, args.access_token, account.as_deref()).await?;
+        resolve_manual_access_token(context, auth, args.access_token, username.as_deref()).await?;
     let fallback_topology = args
         .fallback_topology
         .as_ref()
@@ -318,9 +318,8 @@ async fn login(
     args: LoginArgs,
     debug_http: bool,
 ) -> Result<()> {
-    let registry = ProtonAccountRegistry::from_auth(config)?;
+    let registry = ProtonUserRegistry::from_auth(config)?;
     let LoginArgs {
-        account,
         username,
         password,
         password_file,
@@ -339,48 +338,20 @@ async fn login(
             human_verification_token,
             debug_http,
         };
-    let session = if let Some(account_name) = account.as_deref() {
-        let account = registry.get_required(account_name)?;
-        ensure_username_matches_account(username.as_deref(), account)?;
-        if !password_supplied {
-            if let Some(session) =
-                refresh_stored_login_session(context, &account.username, debug_http).await?
-            {
-                session
-            } else {
-                let session = login_configured_account(
-                    context,
-                    account,
-                    configured_login_options(human_verification_token.clone()),
-                )
-                .await?;
-                persist_proton_session(context, &account.username, None, &session)?;
-                session
-            }
-        } else {
-            let session = login_configured_account(
-                context,
-                account,
-                configured_login_options(human_verification_token.clone()),
-            )
-            .await?;
-            persist_proton_session(context, &account.username, None, &session)?;
-            session
-        }
-    } else if let Some(username) = username {
+    let session = if let Some(username) = username {
         if !password_supplied {
             if let Some(session) =
                 refresh_stored_login_session(context, &username, debug_http).await?
             {
                 session
-            } else if let Some(account) = registry.get_by_username(&username) {
-                let session = login_configured_account(
+            } else if let Some(user) = registry.get_by_username(&username) {
+                let session = login_configured_user(
                     context,
-                    account,
+                    user,
                     configured_login_options(human_verification_token.clone()),
                 )
                 .await?;
-                persist_proton_session(context, &account.username, None, &session)?;
+                persist_proton_session(context, &user.username, None, &session)?;
                 session
             } else {
                 let password =
@@ -398,14 +369,14 @@ async fn login(
                 persist_proton_session(context, &username, None, &session)?;
                 session
             }
-        } else if let Some(account) = registry.get_by_username(&username) {
-            let session = login_configured_account(
+        } else if let Some(user) = registry.get_by_username(&username) {
+            let session = login_configured_user(
                 context,
-                account,
+                user,
                 configured_login_options(human_verification_token.clone()),
             )
             .await?;
-            persist_proton_session(context, &account.username, None, &session)?;
+            persist_proton_session(context, &user.username, None, &session)?;
             session
         } else {
             let password = resolve_cli_password(password, password_file, no_prompt)?;
@@ -423,37 +394,37 @@ async fn login(
             session
         }
     } else if registry.len() == 1 {
-        let account = registry
+        let user = registry
             .iter()
             .next()
-            .context("missing configured Proton account")?;
+            .context("missing configured Proton username")?;
         if !password_supplied {
             if let Some(session) =
-                refresh_stored_login_session(context, &account.username, debug_http).await?
+                refresh_stored_login_session(context, &user.username, debug_http).await?
             {
                 session
             } else {
-                let session = login_configured_account(
+                let session = login_configured_user(
                     context,
-                    account,
+                    user,
                     configured_login_options(human_verification_token.clone()),
                 )
                 .await?;
-                persist_proton_session(context, &account.username, None, &session)?;
+                persist_proton_session(context, &user.username, None, &session)?;
                 session
             }
         } else {
-            let session = login_configured_account(
+            let session = login_configured_user(
                 context,
-                account,
+                user,
                 configured_login_options(human_verification_token),
             )
             .await?;
-            persist_proton_session(context, &account.username, None, &session)?;
+            persist_proton_session(context, &user.username, None, &session)?;
             session
         }
     } else {
-        anyhow::bail!("a Proton account is required; pass --account or --username")
+        anyhow::bail!("a Proton username is required; pass --username")
     };
 
     if let Some(output) = output {
@@ -470,28 +441,22 @@ async fn refresh_vpn_token(
     config: &AuthConfig,
     args: RefreshVpnTokenArgs,
 ) -> Result<()> {
-    let registry = ProtonAccountRegistry::from_auth(config)?;
-    let username = if let Some(account_name) = args.account.as_deref() {
-        registry.get_required(account_name)?.username.clone()
-    } else if let Some(username) = args.username {
+    let registry = ProtonUserRegistry::from_auth(config)?;
+    let username = if let Some(username) = args.username {
         username
     } else if registry.len() == 1 {
         registry
             .iter()
             .next()
-            .context("missing configured Proton account")?
+            .context("missing configured Proton username")?
             .username
             .clone()
     } else {
-        anyhow::bail!("a Proton account is required; pass --account or --username")
+        anyhow::bail!("a Proton username is required; pass --username")
     };
     let store = StateStore::open(context)?;
     let state = store.load_proton_session(&username)?;
-    let relogin_hint = args
-        .account
-        .as_deref()
-        .map(|account| format!("pso auth login --account {account}"))
-        .unwrap_or_else(|| format!("pso auth login --username {username}"));
+    let relogin_hint = format!("pso auth login --username {username}");
     let refreshed = refresh_stored_proton_session(context, &state, false)
         .await
         .with_context(|| {
@@ -536,19 +501,6 @@ async fn refresh_stored_login_session(
     Ok(Some(refreshed))
 }
 
-fn ensure_username_matches_account(username: Option<&str>, account: &ProtonAccount) -> Result<()> {
-    if let Some(username) = username
-        && username != account.username
-    {
-        anyhow::bail!(
-            "configured Proton account '{}' uses username {}; remove --username or use the matching value",
-            account.name,
-            account.username
-        );
-    }
-    Ok(())
-}
-
 fn resolve_cli_password(
     password: Option<String>,
     password_file: Option<PathBuf>,
@@ -573,37 +525,43 @@ async fn resolve_manual_access_token(
     context: &RuntimeContext,
     auth: &AuthConfig,
     access_token: Option<String>,
-    account_name: Option<&str>,
+    username: Option<&str>,
 ) -> Result<ProtonAccessToken> {
-    let registry = ProtonAccountRegistry::from_auth(auth)?;
+    let registry = ProtonUserRegistry::from_auth(auth)?;
     if let Some(access_token) = access_token {
-        require_single_account_access_token(&registry, account_name)?;
+        require_single_user_access_token(&registry, username)?;
         return Ok(ProtonAccessToken::new(
             access_token,
-            load_selected_account_uid(context, &registry, account_name),
+            load_selected_username_uid(context, &registry, username),
         ));
     }
 
     if registry.is_empty() {
         anyhow::bail!(
-            "a Proton access token is required; pass --access-token or configure auth.proton.accounts"
+            "a Proton access token is required; pass --access-token or configure auth.proton.users"
         );
     }
 
-    let account = registry.resolve_selector(account_name, None)?;
+    let user = registry.resolve_username(username)?;
     let mut cache = CachedAccessToken::default();
-    pso::ensure_account_access_token(context, account, &mut cache).await
+    pso::ensure_user_access_token(context, user, &mut cache).await
 }
 
-fn load_selected_account_uid(
+fn load_selected_username_uid(
     context: &RuntimeContext,
-    registry: &ProtonAccountRegistry,
-    account_name: Option<&str>,
+    registry: &ProtonUserRegistry,
+    username: Option<&str>,
 ) -> Option<String> {
-    let account = registry.resolve_selector(account_name, None).ok()?;
+    let username = if let Some(username) = username {
+        username
+    } else if registry.len() == 1 {
+        registry.first_username()?
+    } else {
+        return None;
+    };
     StateStore::open(context)
         .ok()?
-        .load_proton_session(&account.username)
+        .load_proton_session(username)
         .ok()
         .map(|state| state.uid)
 }

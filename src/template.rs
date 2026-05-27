@@ -47,10 +47,9 @@ fn hydrate_outbound(
         .ok_or_else(|| anyhow!("proton outbound is missing tag"))?
         .to_string();
     let username = object
-        .get("account")
-        .or_else(|| object.get("user"))
+        .get("username")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("proton outbound {tag} is missing account"))?
+        .ok_or_else(|| anyhow!("proton outbound {tag} is missing username"))?
         .to_string();
     let filter_value = object
         .get("filter")
@@ -64,7 +63,7 @@ fn hydrate_outbound(
     let credentials = provisioner.provision(&session, &tag, &selected.physical)?;
 
     object.remove("provider");
-    object.remove("user");
+    object.remove("username");
     object.remove("filter");
     object.insert(
         "address".into(),
@@ -107,7 +106,7 @@ mod tests {
                 "type": "wireguard",
                 "tag": "proton-free-jp",
                 "provider": "proton",
-                "account": "bob@example.com",
+                "username": "bob@example.com",
                 "filter": { "country": ["JP"], "tier": "Free" }
             }]
         });

@@ -83,13 +83,10 @@ pub fn select_target(
     filter: &ServerFilter,
     session: &UserSession,
 ) -> Result<SelectedTarget> {
-    let requested_tier = filter
-        .tier
-        .as_deref()
-        .unwrap_or(session.account_tier.as_str());
+    let requested_tier = filter.tier.as_deref().unwrap_or(session.tier.as_str());
     let max_tier = tier_to_proton_value(requested_tier)?;
-    let account_tier = tier_to_proton_value(&session.account_tier)?;
-    let effective_tier = max_tier.min(account_tier);
+    let user_tier = tier_to_proton_value(&session.tier)?;
+    let effective_tier = max_tier.min(user_tier);
 
     let mut candidates = Vec::new();
     for logical in servers {

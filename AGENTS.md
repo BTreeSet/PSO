@@ -23,13 +23,13 @@ Guidance for agents working on Proton-Singbox Orchestrator (PSO).
 
 ## Project Intent
 
-PSO is a Rust control plane for automatic `sing-box` orchestration from ProtonVPN account state and declarative configuration. The intended production path is a compiled binary or container running `pso run` with a mounted state directory. Manual subcommands exist for setup and troubleshooting.
+PSO is a Rust control plane for automatic `sing-box` orchestration from ProtonVPN username-based session state and declarative configuration. The intended production path is a compiled binary or container running `pso run` with a mounted state directory. Manual subcommands exist for setup and troubleshooting.
 
 Keep three runtime concepts separate:
 
 - App binary: `pso` and, in containers, the bundled `sing-box` binary.
 - Declarative configuration: operator-authored files such as `pso.config.json` and `config.template.json`.
-- State directory: user-opaque persistent runtime data managed by PSO, such as `pso.sqlite3` for per-account VPN session state, endpoint certificate/key metadata, runtime events, health history, and `logicals.json` for Proton topology state.
+- State directory: user-opaque persistent runtime data managed by PSO, such as `pso.sqlite3` for per-username VPN session state, endpoint certificate/key metadata, runtime events, health history, and `logicals.json` for Proton topology state.
 
 ## Architecture Rules
 
@@ -42,7 +42,7 @@ Keep three runtime concepts separate:
 - Auth flows must support headless operation: password in config/file/env, TOTP in config/env, mounted state directory, and CAPTCHA token retry.
 - Health and recovery should be automatic in the `run` path. Manual commands should remain useful for troubleshooting but should not be the primary operational model.
 - State observability belongs in the grouped `state` CLI. Prefer stable, typed SQLite queries over ad hoc shell instructions.
-- Multi-account work must keep each Proton account isolated in state and refresh WireGuard identity independently per endpoint. Usernames are identifiers, not filesystem-safe names; hash or otherwise normalize them before using them in state paths.
+- Multi-username work must keep each Proton username isolated in state and refresh WireGuard identity independently per endpoint. Usernames are identifiers, not filesystem-safe names; hash or otherwise normalize them before using them in state paths.
 
 ## Code Style
 

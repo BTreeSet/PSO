@@ -7,11 +7,11 @@ use base64::{Engine as _, engine::general_purpose};
 use serde_json::json;
 use tracing::warn;
 
-use crate::accounts::ProtonAccount;
 use crate::api::{AuthTokens, HumanVerificationChallenge, ProtonAccessToken, ProtonApiClient};
 use crate::auth::{calculate_srp_proof, resolve_two_factor_code};
 use crate::config::RuntimeContext;
 use crate::state::{ProtonSessionState, StateStore};
+use crate::users::ProtonUser;
 
 const ACCESS_TOKEN_REFRESH_MARGIN_MS: i64 = 60_000;
 pub const PROTON_WIREGUARD_ADDRESS_V4: &str = "10.2.0.2/32";
@@ -146,7 +146,7 @@ pub async fn login_with_prompts(
     if auth_response.requires_two_factor() {
         if !auth_response.supports_totp() {
             bail!(
-                "Proton account requires a second factor that PSO cannot complete automatically; configure a TOTP-capable account or complete login outside PSO"
+                "Proton username requires a second factor that PSO cannot complete automatically; configure a TOTP-capable username or complete login outside PSO"
             );
         }
 
@@ -154,7 +154,7 @@ pub async fn login_with_prompts(
             Some(value) => value,
             None if !no_prompt => rpassword::prompt_password("Proton TOTP: ")?,
             None => bail!(
-                "TOTP is required for this account; pass --totp, configure account.totp, or disable no_prompt"
+                "TOTP is required for this username; pass --totp, configure username.totp, or disable no_prompt"
             ),
         };
         let totp = resolve_two_factor_code(&totp_input)?;
@@ -165,13 +165,13 @@ pub async fn login_with_prompts(
     Ok(auth_response.tokens)
 }
 
-pub async fn login_configured_account(
+pub async fn login_configured_user(
     context: &RuntimeContext,
-    account: &ProtonAccount,
+    user: &ProtonUser,
     options: ConfiguredLoginOptions,
 ) -> Result<AuthTokens> {
-    let password = resolve_configured_account_password(
-        account,
+    let password = resolve_configured_user_password(
+        user,
         options.password_override,
         options.password_file_override,
         options.no_prompt_override,
@@ -179,10 +179,10 @@ pub async fn login_configured_account(
 
     login_with_prompts(
         context,
-        &account.username,
+        &user.username,
         password,
-        options.totp_override.or_else(|| account.totp.clone()),
-        account.no_prompt || options.no_prompt_override,
+        options.totp_override.or_else(|| user.totp.clone()),
+        user.no_prompt || options.no_prompt_override,
         options.human_verification_token,
         options.debug_http,
     )
@@ -262,8 +262,8 @@ pub fn persist_proton_session(
     store_tokens_in_state(&store, username, state_uid, tokens)
 }
 
-fn resolve_configured_account_password(
-    account: &ProtonAccount,
+fn resolve_configured_user_password(
+    user: &ProtonUser,
     password_override: Option<String>,
     password_file_override: Option<PathBuf>,
     no_prompt_override: bool,
@@ -275,26 +275,23 @@ fn resolve_configured_account_password(
                 .with_context(|| format!("failed to read {}", path.display()))?
                 .trim_end_matches(['\r', '\n'])
                 .to_string()),
-            None => match account.password_from_config()? {
+            None => match user.password_from_config()? {
                 Some(password) => Ok(password),
-                None if !(no_prompt_override || account.no_prompt) => {
-                    Ok(rpassword::prompt_password(format!(
-                        "Proton password for {}: ",
-                        account.display_name()
-                    ))?)
-                }
+                None if !(no_prompt_override || user.no_prompt) => Ok(rpassword::prompt_password(
+                    format!("Proton password for {}: ", user.username),
+                )?),
                 None => bail!(
-                    "password is required for Proton account '{}'; set password, password_file, or disable no_prompt for interactive login",
-                    account.name
+                    "password is required for Proton username '{}'; set password, password_file, or disable no_prompt for interactive login",
+                    user.username
                 ),
             },
         },
     }
 }
 
-pub async fn ensure_account_access_token(
+pub async fn ensure_user_access_token(
     context: &RuntimeContext,
-    account: &ProtonAccount,
+    user: &ProtonUser,
     cache: &mut CachedAccessToken,
 ) -> Result<ProtonAccessToken> {
     if let Some(token) = cache.fresh_token() {
@@ -302,10 +299,10 @@ pub async fn ensure_account_access_token(
     }
 
     let store = StateStore::open(context)?;
-    match store.load_proton_session_optional(&account.username)? {
+    match store.load_proton_session_optional(&user.username)? {
         Some(state) => match refresh_stored_proton_session(context, &state, false).await {
             Ok(tokens) => {
-                store_tokens_in_state(&store, &account.username, Some(&state.uid), &tokens)?;
+                store_tokens_in_state(&store, &user.username, Some(&state.uid), &tokens)?;
                 cache.store(&tokens, Some(&state.uid));
                 Ok(ProtonAccessToken::from_tokens(&tokens, Some(&state.uid)))
             }
@@ -313,16 +310,16 @@ pub async fn ensure_account_access_token(
                 let refresh_error_message = refresh_error.to_string();
                 record_session_event(
                     &store,
-                    &account.username,
+                    &user.username,
                     "proton_session_refresh_failed",
                     json!({
-                        "account": account.name,
+                        "username": user.username,
                         "error": refresh_error_message,
                     }),
                 );
-                login_and_store_account_access_token(
+                login_and_store_user_access_token(
                     context,
-                    account,
+                    user,
                     cache,
                     Some(&state.uid),
                     SessionLoginReason::RefreshFailure,
@@ -332,9 +329,9 @@ pub async fn ensure_account_access_token(
             }
         },
         None => {
-            login_and_store_account_access_token(
+            login_and_store_user_access_token(
                 context,
-                account,
+                user,
                 cache,
                 None,
                 SessionLoginReason::MissingStoredSession,
@@ -366,23 +363,22 @@ fn store_tokens_in_state(
     store.store_proton_session(username, uid, &tokens.refresh_token)
 }
 
-async fn login_and_store_account_access_token(
+async fn login_and_store_user_access_token(
     context: &RuntimeContext,
-    account: &ProtonAccount,
+    user: &ProtonUser,
     cache: &mut CachedAccessToken,
     fallback_uid: Option<&str>,
     reason: SessionLoginReason,
     refresh_error: Option<&str>,
 ) -> Result<ProtonAccessToken> {
-    if account.no_prompt {
-        account
-            .ensure_can_login_headless()
-            .with_context(|| headless_relogin_error(account, reason, refresh_error))?;
+    if user.no_prompt {
+        user.ensure_can_login_headless()
+            .with_context(|| headless_relogin_error(user, reason, refresh_error))?;
     }
 
-    let tokens = login_configured_account(
+    let tokens = login_configured_user(
         context,
-        account,
+        user,
         ConfiguredLoginOptions {
             password_override: None,
             password_file_override: None,
@@ -393,17 +389,17 @@ async fn login_and_store_account_access_token(
         },
     )
     .await
-    .with_context(|| login_error_context(account, reason, refresh_error))?;
+    .with_context(|| login_error_context(user, reason, refresh_error))?;
     let store = StateStore::open(context)?;
-    store_tokens_in_state(&store, &account.username, fallback_uid, &tokens)?;
+    store_tokens_in_state(&store, &user.username, fallback_uid, &tokens)?;
     cache.store(&tokens, fallback_uid);
 
     record_session_event(
         &store,
-        &account.username,
+        &user.username,
         reason.event_type(),
         json!({
-            "account": account.name,
+            "username": user.username,
             "reason": reason.reason_label(),
         }),
     );
@@ -412,36 +408,36 @@ async fn login_and_store_account_access_token(
 }
 
 fn headless_relogin_error(
-    account: &ProtonAccount,
+    user: &ProtonUser,
     reason: SessionLoginReason,
     refresh_error: Option<&str>,
 ) -> String {
     match reason {
         SessionLoginReason::MissingStoredSession => format!(
-            "Proton account '{}' has no stored session and cannot log in headlessly without password or password_file",
-            account.name
+            "Proton username '{}' has no stored session and cannot log in headlessly without password or password_file",
+            user.username
         ),
         SessionLoginReason::RefreshFailure => format!(
-            "stored Proton session refresh failed for account '{}' and headless re-login is unavailable: {}",
-            account.name,
+            "stored Proton session refresh failed for username '{}' and headless re-login is unavailable: {}",
+            user.username,
             refresh_error.unwrap_or("refresh failed")
         ),
     }
 }
 
 fn login_error_context(
-    account: &ProtonAccount,
+    user: &ProtonUser,
     reason: SessionLoginReason,
     refresh_error: Option<&str>,
 ) -> String {
     match reason {
         SessionLoginReason::MissingStoredSession => format!(
-            "failed to log in Proton account '{}' because no stored session exists",
-            account.name
+            "failed to log in Proton username '{}' because no stored session exists",
+            user.username
         ),
         SessionLoginReason::RefreshFailure => format!(
-            "stored Proton session refresh failed for account '{}' ({}); re-login also failed",
-            account.name,
+            "stored Proton session refresh failed for username '{}' ({}); re-login also failed",
+            user.username,
             refresh_error.unwrap_or("refresh failed")
         ),
     }
@@ -549,12 +545,11 @@ mod tests {
     }
 
     #[test]
-    fn configured_account_password_prefers_password_file_override() {
+    fn configured_user_password_prefers_password_file_override() {
         let password_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(password_file.path(), "from-file\n").unwrap();
 
-        let account = ProtonAccount {
-            name: "example".into(),
+        let user = ProtonUser {
             username: "example@example.com".into(),
             tier: "vpn".into(),
             password: Some("from-config".into()),
@@ -563,8 +558,8 @@ mod tests {
             no_prompt: false,
         };
 
-        let password = resolve_configured_account_password(
-            &account,
+        let password = resolve_configured_user_password(
+            &user,
             None,
             Some(password_file.path().to_path_buf()),
             true,
@@ -575,9 +570,8 @@ mod tests {
     }
 
     #[test]
-    fn configured_account_password_respects_no_prompt_override() {
-        let account = ProtonAccount {
-            name: "example".into(),
+    fn configured_user_password_respects_no_prompt_override() {
+        let user = ProtonUser {
             username: "example@example.com".into(),
             tier: "vpn".into(),
             password: None,
@@ -586,7 +580,7 @@ mod tests {
             no_prompt: false,
         };
 
-        let error = resolve_configured_account_password(&account, None, None, true).unwrap_err();
+        let error = resolve_configured_user_password(&user, None, None, true).unwrap_err();
 
         assert!(error.to_string().contains("password is required"));
     }

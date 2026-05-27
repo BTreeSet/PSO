@@ -2,13 +2,13 @@ use anyhow::Result;
 use pso::cli::{StateArgs, StateCommand, StateListArgs};
 use pso::config::RuntimeContext;
 use pso::state::{
-    AccountRow, CertificateRow, HealthCheckRow, RuntimeEventRow, StateStore, WireGuardEndpointRow,
+    CertificateRow, HealthCheckRow, RuntimeEventRow, StateStore, UserRow, WireGuardEndpointRow,
 };
 
 pub fn run_state(context: &RuntimeContext, args: StateArgs) -> Result<()> {
     let store = StateStore::open(context)?;
     match args.command {
-        StateCommand::Accounts => print_accounts(&store.list_accounts()?),
+        StateCommand::Users => print_users(&store.list_users()?),
         StateCommand::Certs(args) => print_certs(&store.list_certificates(args.limit)?, &args),
         StateCommand::Wireguard(args) => {
             print_wireguard(&store.list_wireguard_endpoints(args.limit)?, &args)
@@ -18,13 +18,13 @@ pub fn run_state(context: &RuntimeContext, args: StateArgs) -> Result<()> {
     }
 }
 
-fn print_accounts(rows: &[AccountRow]) -> Result<()> {
-    println!("updated_at\taccount_key\thas_proton_session\tusername");
+fn print_users(rows: &[UserRow]) -> Result<()> {
+    println!("updated_at\tusername_key\thas_proton_session\tusername");
     for row in rows {
         println!(
             "{}\t{}\t{}\t{}",
             row.updated_at,
-            shorten(&row.account_key),
+            shorten(&row.username_key),
             row.has_proton_session,
             row.username
         );

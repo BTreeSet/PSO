@@ -1,4 +1,3 @@
-pub mod accounts;
 pub mod api;
 pub mod auth;
 pub mod cli;
@@ -22,8 +21,8 @@ mod state_model;
 pub mod supervisor;
 mod supervisor_render;
 pub mod template;
+pub mod users;
 
-pub use accounts::{ProtonAccount, ProtonAccountRegistry, require_single_account_access_token};
 pub use api::{CertificateRequest, CertificateResponse, ProtonAccessToken, ProtonApiClient};
 pub use auth::{SrpProof, calculate_srp_proof, resolve_two_factor_code};
 pub use control_plane::{CertificateRefreshOutcome, ControlPlane, ControlPlaneConfig};
@@ -34,7 +33,7 @@ pub use health::{HealthMonitor, HealthStatus, ProbeResult};
 pub use model::{LogicalServer, PhysicalServer};
 pub use process::{find_process_pid, find_process_pid_by_exe, sighup_process};
 pub use proton::{
-    CachedAccessToken, ensure_account_access_token, login_configured_account, login_with_prompts,
+    CachedAccessToken, ensure_user_access_token, login_configured_user, login_with_prompts,
 };
 pub use provider::{
     KnownWireGuardProvider, ProvidersConfig, WireGuardEndpointResolution, WireGuardProviderConfig,
@@ -45,3 +44,4 @@ pub use scheduler::{RefreshDecision, RefreshScheduler};
 pub use session::{ActiveOutbound, SessionStore, UserSession};
 pub use singbox_adapter::{SingboxWireGuardEndpoint, build_wireguard_endpoint};
 pub use template::hydrate_template;
+pub use users::{ProtonUser, ProtonUserRegistry, require_single_user_access_token};
