@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,6 +11,7 @@ use tracing::{error, info, warn};
 
 use crate::api::{CertificateRequest, ProtonAccessToken, ProtonApiClient};
 use crate::crypto::{KeyMaterial, generate_key_material};
+use crate::current_time_ms;
 use crate::model::PhysicalServer;
 use crate::process::sighup_process;
 use crate::proton::{PROTON_WIREGUARD_KEEPALIVE_INTERVAL, proton_wireguard_assigned_ips};
@@ -60,7 +62,8 @@ impl ControlPlane {
                 .api
                 .get_certificate(&config.access_token, &request)
                 .await;
-            let now_ms = current_time_ms();
+            let now_ms = u64::try_from(current_time_ms())
+                .context("current system time must be after the Unix epoch")?;
 
             let decision = match result {
                 Ok(certificate) => {
@@ -172,13 +175,6 @@ pub fn write_singbox_config(path: &PathBuf, value: &serde_json::Value) -> Result
         .map_err(|error| error.error)
         .with_context(|| format!("failed to persist {}", path.display()))?;
     Ok(())
-}
-
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[allow(dead_code)]

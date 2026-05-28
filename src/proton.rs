@@ -13,6 +13,7 @@ use crate::api::{
 };
 use crate::auth::{calculate_srp_proof, resolve_two_factor_code};
 use crate::config::RuntimeContext;
+use crate::current_time_ms;
 use crate::state::{ProtonSessionState, StateStore};
 use crate::token_refresh::TokenRefreshWindow;
 use crate::users::ProtonUser;
@@ -537,13 +538,6 @@ impl SessionLoginReason {
             Self::RefreshFailure => "refresh_failure",
         }
     }
-}
-
-fn current_time_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 pub fn proton_wireguard_assigned_ips() -> Vec<String> {

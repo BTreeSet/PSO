@@ -18,6 +18,8 @@ pub mod session;
 pub mod singbox_adapter;
 pub mod state;
 mod state_model;
+mod time_utils;
+pub(crate) use time_utils::current_time_ms;
 pub mod supervisor;
 mod supervisor_render;
 pub mod template;

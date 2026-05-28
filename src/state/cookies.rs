@@ -5,6 +5,8 @@ use anyhow::Result;
 use rusqlite::{ToSql, params, params_from_iter};
 use tracing::warn;
 
+use crate::current_time_ms;
+
 use super::cookies_support::{
     canonicalize_cookie_path, canonicalize_host, canonicalize_request_path, canonicalize_same_site,
     cookie_domain_candidates, default_cookie_path, domain_matches, normalize_cookie_value,
@@ -395,10 +397,6 @@ fn parse_set_cookie(
         expires_at_ms,
         created_at: unix_timestamp().ok()?,
     })
-}
-
-fn current_time_ms() -> i64 {
-    system_time_to_unix_ms(SystemTime::now()).unwrap_or(i64::MAX)
 }
 
 fn system_time_to_unix_ms(value: SystemTime) -> Option<i64> {

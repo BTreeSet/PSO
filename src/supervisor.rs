@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ use crate::api::{
 };
 use crate::config::{AppConfig, RenderConfig, RuntimeContext, TopologyConfig, read_json};
 use crate::crypto::generate_key_material;
+use crate::current_time_ms;
 use crate::filter::{ServerFilter, select_target};
 use crate::health::{HealthMonitor, HealthStatus, ProbeResult};
 use crate::model::{LogicalServer, PhysicalServer, ProtonLogicalResponse};
@@ -1077,11 +1078,4 @@ fn record_runtime_error(
         let details = serde_json::to_string(&json!({ "error": error.to_string() })).ok();
         let _ = store.record_event(username, outbound_tag, event_type, details.as_deref());
     }
-}
-
-fn current_time_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
