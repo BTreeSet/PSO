@@ -75,17 +75,17 @@ pub(crate) fn browser_default_headers() -> HeaderMap {
     headers
 }
 
-pub(crate) fn human_verification_request_headers(token: &str) -> HeaderMap {
+pub(crate) fn human_verification_request_headers(token: &str) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-pm-human-verification-token",
-        HeaderValue::from_str(token).expect("invalid Proton human verification token"),
+        HeaderValue::from_str(token).context("invalid Proton human verification token")?,
     );
     headers.insert(
         "x-pm-human-verification-token-type",
         HeaderValue::from_static(HUMAN_VERIFICATION_CAPTCHA_TYPE),
     );
-    headers
+    Ok(headers)
 }
 
 pub(crate) fn with_browser_referer_headers(
@@ -355,7 +355,8 @@ mod tests {
 
     #[test]
     fn human_verification_request_headers_match_capture() {
-        let headers = human_verification_request_headers("challenge-token:resolved-token");
+        let headers =
+            human_verification_request_headers("challenge-token:resolved-token").expect("headers");
         assert_eq!(
             headers.get("x-pm-human-verification-token").unwrap(),
             "challenge-token:resolved-token"
@@ -364,6 +365,11 @@ mod tests {
             headers.get("x-pm-human-verification-token-type").unwrap(),
             "captcha"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_human_verification_tokens() {
+        assert!(human_verification_request_headers("bad\nvalue").is_err());
     }
 
     #[test]

@@ -435,6 +435,10 @@ impl ProtonApiClient {
             intent,
         };
         let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
+        let human_verification_headers = human_verification_token
+            .map(human_verification_request_headers)
+            .transpose()
+            .context("failed to prepare Proton human verification headers")?;
         send_json_with_retry_with_observer(
             || {
                 let mut builder = with_browser_origin_headers(
@@ -446,8 +450,8 @@ impl ProtonApiClient {
                     BROWSER_LOGIN_REFERER,
                 )
                 .json(&request);
-                if let Some(token) = human_verification_token {
-                    builder = builder.headers(human_verification_request_headers(token));
+                if let Some(headers) = human_verification_headers.as_ref() {
+                    builder = builder.headers(headers.clone());
                 }
                 builder = self.with_username_cookie_header(builder, Some(username), &request_url);
                 builder
@@ -479,6 +483,10 @@ impl ProtonApiClient {
             two_factor_code: two_factor_code.map(ToOwned::to_owned),
         };
         let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
+        let human_verification_headers = human_verification_token
+            .map(human_verification_request_headers)
+            .transpose()
+            .context("failed to prepare Proton human verification headers")?;
         send_json_with_retry_with_observer(
             || {
                 let mut builder = with_browser_origin_headers(
@@ -490,8 +498,8 @@ impl ProtonApiClient {
                     BROWSER_LOGIN_REFERER,
                 )
                 .json(&request);
-                if let Some(token) = human_verification_token {
-                    builder = builder.headers(human_verification_request_headers(token));
+                if let Some(headers) = human_verification_headers.as_ref() {
+                    builder = builder.headers(headers.clone());
                 }
                 builder = self.with_username_cookie_header(builder, Some(username), &request_url);
                 builder

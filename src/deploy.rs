@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use tokio::process::Command;
 
+use crate::process::sighup_process;
+
 #[derive(Clone, Debug)]
 pub struct DeployPlan {
     pub singbox_bin: PathBuf,
@@ -15,7 +17,7 @@ pub struct DeployPlan {
 pub async fn deploy_with_sighup(plan: &DeployPlan) -> Result<()> {
     validate_singbox_config(&plan.singbox_bin, &plan.rendered_tmp).await?;
     atomic_swap(&plan.rendered_tmp, &plan.active_config)?;
-    send_sighup(plan.singbox_pid)?;
+    sighup_process(plan.singbox_pid)?;
     Ok(())
 }
 
@@ -51,14 +53,5 @@ pub fn atomic_swap(rendered_tmp: &Path, active_config: &Path) -> Result<()> {
             active_config.display()
         )
     })?;
-    Ok(())
-}
-
-pub fn send_sighup(pid: i32) -> Result<()> {
-    let result = unsafe { libc::kill(pid, libc::SIGHUP) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("failed to send SIGHUP to pid {pid}"));
-    }
     Ok(())
 }

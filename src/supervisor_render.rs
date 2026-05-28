@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Map, Value, json};
@@ -9,7 +9,7 @@ use tracing::info;
 use crate::config::{RenderConfig, RuntimeContext};
 use crate::deploy::{DeployPlan, deploy_with_sighup, validate_singbox_config};
 use crate::filter::ServerFilter;
-use crate::process::{find_process_pid, find_process_pid_by_exe};
+use crate::process::resolve_singbox_pid;
 use crate::provider::{PROTON_PROVIDER, WireGuardServerFilter, normalize_provider_name};
 use crate::session::UserSession;
 use crate::singbox_adapter::split_endpoint;
@@ -65,7 +65,7 @@ pub(crate) async fn render_and_deploy(runtime: &SupervisorRuntime) -> Result<()>
     if let Some(active_config) = active_config {
         let singbox_pid = match runtime.render.singbox_pid {
             Some(pid) => pid,
-            None => resolve_singbox_pid(&singbox_bin)?,
+            None => resolve_singbox_pid(&singbox_bin, "singbox_pid")?,
         };
         deploy_with_sighup(&DeployPlan {
             singbox_bin,
@@ -407,22 +407,5 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<Stri
         Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.clone())),
         Some(_) => anyhow::bail!("{key} must be a string"),
-    }
-}
-
-fn resolve_singbox_pid(singbox_bin: &Path) -> Result<i32> {
-    match find_process_pid_by_exe(singbox_bin) {
-        Ok(Some(pid)) => Ok(pid),
-        Ok(None) => find_process_pid("sing-box").with_context(|| {
-            format!(
-                "sing-box process was not found for executable {}; pass singbox_pid to target an explicit process",
-                singbox_bin.display()
-            )
-        }),
-        Err(error) => find_process_pid("sing-box").with_context(|| {
-            format!(
-                "failed to match sing-box executable path ({error:#}); pass singbox_pid to target an explicit process"
-            )
-        }),
     }
 }

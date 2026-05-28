@@ -17,7 +17,7 @@ use pso::config::{
 use pso::control_plane::{ControlPlane, ControlPlaneConfig};
 use pso::health::HealthMonitor;
 use pso::model::{PhysicalServer, ProtonLogicalResponse};
-use pso::process::{find_process_pid, find_process_pid_by_exe};
+use pso::process::resolve_singbox_pid;
 use pso::proton::{
     CachedAccessToken, ConfiguredLoginOptions, login_configured_user, login_with_prompts,
     persist_proton_session,
@@ -193,7 +193,7 @@ async fn control_plane(
         .unwrap_or_else(|| PathBuf::from("sing-box"));
     let singbox_pid = match args.singbox_pid.or(config.singbox_pid) {
         Some(pid) => pid,
-        None => resolve_singbox_pid(&singbox_bin)?,
+        None => resolve_singbox_pid(&singbox_bin, "--singbox-pid")?,
     };
     let active_config = args
         .active_config
@@ -562,21 +562,4 @@ fn load_selected_username_uid(
 fn write_json_output(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     fs::write(path, serde_json::to_string_pretty(value)?)
         .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn resolve_singbox_pid(singbox_bin: &Path) -> Result<i32> {
-    match find_process_pid_by_exe(singbox_bin) {
-        Ok(Some(pid)) => Ok(pid),
-        Ok(None) => find_process_pid("sing-box").with_context(|| {
-            format!(
-                "sing-box process was not found for executable {}; pass --singbox-pid to target an explicit process",
-                singbox_bin.display()
-            )
-        }),
-        Err(error) => find_process_pid("sing-box").with_context(|| {
-            format!(
-                "failed to match sing-box executable path ({error:#}); pass --singbox-pid to target an explicit process"
-            )
-        }),
-    }
 }

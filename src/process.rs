@@ -28,6 +28,23 @@ pub fn find_process_pid_by_exe(executable: &Path) -> Result<Option<i32>> {
     }))
 }
 
+pub fn resolve_singbox_pid(singbox_bin: &Path, explicit_pid_hint: &str) -> Result<i32> {
+    match find_process_pid_by_exe(singbox_bin) {
+        Ok(Some(pid)) => Ok(pid),
+        Ok(None) => find_process_pid("sing-box").with_context(|| {
+            format!(
+                "sing-box process was not found for executable {}; pass {explicit_pid_hint} to target an explicit process",
+                singbox_bin.display()
+            )
+        }),
+        Err(error) => find_process_pid("sing-box").with_context(|| {
+            format!(
+                "failed to match sing-box executable path ({error:#}); pass {explicit_pid_hint} to target an explicit process"
+            )
+        }),
+    }
+}
+
 pub fn sighup_process(pid: i32) -> Result<()> {
     let result = unsafe { libc::kill(pid, libc::SIGHUP) };
     if result != 0 {
