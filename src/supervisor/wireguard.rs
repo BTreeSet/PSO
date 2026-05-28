@@ -137,3 +137,95 @@ pub(crate) async fn ensure_static_wireguard_endpoint_state(
     })?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ProtonClientProfile, RuntimeContext};
+    use crate::provider::{
+        ProvidersConfig, StringMatch, WireGuardProviderConfig, WireGuardProviderSource,
+        WireGuardServerConfig, WireGuardServerFilter,
+    };
+    use std::path::Path;
+
+    fn runtime_context(state_dir: &Path) -> RuntimeContext {
+        RuntimeContext {
+            api_base_url: "https://example.invalid/api".into(),
+            state_dir: state_dir.to_path_buf(),
+            proton_client: ProtonClientProfile::default(),
+        }
+    }
+
+    fn provider_config() -> WireGuardProviderConfig {
+        WireGuardProviderConfig {
+            name: "test-provider".into(),
+            source: WireGuardProviderSource::Static,
+            default_port: Some(51820),
+            local_address: vec!["10.8.0.2/32".into()],
+            allowed_ips: vec!["0.0.0.0/0".into(), "::/0".into()],
+            pre_shared_key: None,
+            persistent_keepalive_interval: Some(25),
+            servers: vec![WireGuardServerConfig {
+                id: Some("srv-1".into()),
+                name: Some("srv-1".into()),
+                country: Some("NL".into()),
+                city: Some("Amsterdam".into()),
+                region: None,
+                endpoint: Some("198.51.100.10".into()),
+                endpoint_port: None,
+                public_key: Some("server-public-key".into()),
+                pre_shared_key: None,
+                load: Some(10),
+                status: Some(1),
+                features: Vec::new(),
+                local_address: Vec::new(),
+                allowed_ips: Vec::new(),
+                persistent_keepalive_interval: None,
+                reserved: None,
+            }],
+        }
+    }
+
+    fn endpoint_spec() -> StaticWireGuardEndpointSpec {
+        StaticWireGuardEndpointSpec {
+            tag: "wireguard-outbound".into(),
+            provider: "test-provider".into(),
+            filter: WireGuardServerFilter {
+                country: Some(StringMatch::One("NL".into())),
+                city: None,
+                region: None,
+                server: None,
+                features: Vec::new(),
+                max_load: None,
+                status: None,
+                sort_by: Default::default(),
+            },
+            local_address: Vec::new(),
+            allowed_ips: Vec::new(),
+            pre_shared_key: None,
+            persistent_keepalive_interval: None,
+            reserved: None,
+            health_proxy_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_static_wireguard_endpoint_state_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = runtime_context(temp.path());
+        let providers = ProvidersConfig {
+            wireguard: vec![provider_config()],
+        };
+        let spec = endpoint_spec();
+
+        let changed = ensure_static_wireguard_endpoint_state(&context, &providers, &spec, false)
+            .await
+            .unwrap();
+        assert!(changed);
+
+        let changed = ensure_static_wireguard_endpoint_state(&context, &providers, &spec, false)
+            .await
+            .unwrap();
+        assert!(!changed);
+    }
+}

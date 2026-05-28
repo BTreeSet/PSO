@@ -53,3 +53,39 @@ pub fn sighup_process(pid: i32) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    #[test]
+    fn resolve_singbox_pid_matches_unique_executable_copy() {
+        let sleep_path = Command::new("sh")
+            .arg("-c")
+            .arg("command -v sleep")
+            .output()
+            .expect("sleep path")
+            .stdout;
+        let sleep_path = std::str::from_utf8(&sleep_path)
+            .expect("sleep path utf8")
+            .trim();
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let copied_sleep = temp_dir.path().join("sleep-copy");
+        fs::copy(sleep_path, &copied_sleep).expect("copy sleep binary");
+
+        let mut child = Command::new(&copied_sleep)
+            .arg("30")
+            .spawn()
+            .expect("spawn copied sleep");
+
+        let pid = resolve_singbox_pid(Path::new(&copied_sleep), "--singbox-pid")
+            .expect("resolve copied sleep pid");
+
+        assert_eq!(pid, child.id() as i32);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}

@@ -66,3 +66,64 @@ pub(crate) fn load_topology(
     }
     anyhow::bail!("no topology file is available for supervisor")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ProtonClientProfile, RenderConfig, RuntimeContext, TopologyConfig};
+    use crate::state::topology_state_file;
+    use std::fs;
+    use std::path::Path;
+
+    fn runtime_context(state_dir: &Path) -> RuntimeContext {
+        RuntimeContext {
+            api_base_url: "https://example.invalid/api".into(),
+            state_dir: state_dir.to_path_buf(),
+            proton_client: ProtonClientProfile::default(),
+        }
+    }
+
+    fn write_logicals(path: &Path, name: &str) {
+        let value = serde_json::json!({
+            "LogicalServers": [{
+                "Name": name,
+                "ExitCountry": "US"
+            }]
+        });
+        fs::write(path, serde_json::to_string(&value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn load_topology_prefers_primary_then_state_then_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let primary = temp.path().join("primary.json");
+        let fallback = temp.path().join("fallback.json");
+        let context = runtime_context(&state_dir);
+        let render = RenderConfig {
+            topology: Some(primary.clone()),
+            ..Default::default()
+        };
+        let topology = TopologyConfig {
+            fallback_topology: Some(fallback.clone()),
+            ..Default::default()
+        };
+        let state = topology_state_file(&context);
+
+        write_logicals(&primary, "primary");
+        write_logicals(&state, "state");
+        write_logicals(&fallback, "fallback");
+
+        let servers = load_topology(&context, &render, &topology).unwrap();
+        assert_eq!(servers[0].name, "primary");
+
+        fs::remove_file(&primary).unwrap();
+        let servers = load_topology(&context, &render, &topology).unwrap();
+        assert_eq!(servers[0].name, "state");
+
+        fs::remove_file(&state).unwrap();
+        let servers = load_topology(&context, &render, &topology).unwrap();
+        assert_eq!(servers[0].name, "fallback");
+    }
+}

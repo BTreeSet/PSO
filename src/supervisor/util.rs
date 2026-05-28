@@ -66,3 +66,113 @@ pub(crate) fn record_runtime_error(
         let _ = store.record_event(username, outbound_tag, event_type, details.as_deref());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TopologyConfig;
+    use crate::filter::{ServerFilter, SortMode};
+    use crate::model::PhysicalServer;
+    use crate::provider::WireGuardServerFilter;
+    use std::collections::BTreeMap;
+
+    fn proton_spec(username: &str) -> EndpointSpec {
+        EndpointSpec::Proton(super::super::ProtonEndpointSpec {
+            tag: "proton-outbound".into(),
+            username: username.into(),
+            filter: ServerFilter {
+                country: None,
+                city: None,
+                tier: None,
+                features: None,
+                max_load: None,
+                status: None,
+                sort_by: SortMode::LoadAsc,
+            },
+            health_proxy_url: None,
+        })
+    }
+
+    fn wireguard_spec() -> EndpointSpec {
+        EndpointSpec::StaticWireGuard(super::super::StaticWireGuardEndpointSpec {
+            tag: "wireguard-outbound".into(),
+            provider: "provider".into(),
+            filter: WireGuardServerFilter {
+                country: None,
+                city: None,
+                region: None,
+                server: None,
+                features: Vec::new(),
+                max_load: None,
+                status: None,
+                sort_by: Default::default(),
+            },
+            local_address: Vec::new(),
+            allowed_ips: Vec::new(),
+            pre_shared_key: None,
+            persistent_keepalive_interval: None,
+            reserved: None,
+            health_proxy_url: None,
+        })
+    }
+
+    fn physical_server(id: &str, name: &str) -> PhysicalServer {
+        PhysicalServer {
+            id: id.into(),
+            name: name.into(),
+            entry_ip: None,
+            entry_ipv6: None,
+            entry_per_protocol: BTreeMap::new(),
+            exit_ip: None,
+            domain: None,
+            label: None,
+            status: 1,
+            load: None,
+            public_key: None,
+            generation: None,
+            services_down: None,
+            services_down_reason: None,
+        }
+    }
+
+    #[test]
+    fn topology_username_prefers_explicit_config() {
+        let topology = TopologyConfig {
+            username: Some("alice".into()),
+            ..Default::default()
+        };
+
+        let username = topology_username(&topology, &[proton_spec("bob")]);
+
+        assert_eq!(username.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn topology_username_falls_back_to_first_proton_user() {
+        let topology = TopologyConfig::default();
+
+        let username = topology_username(&topology, &[wireguard_spec(), proton_spec("bob")]);
+
+        assert_eq!(username.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn endpoint_username_distinguishes_endpoint_types() {
+        assert_eq!(endpoint_username(&proton_spec("bob")), Some("bob"));
+        assert_eq!(endpoint_username(&wireguard_spec()), None);
+    }
+
+    #[test]
+    fn stable_server_id_prefers_non_empty_id() {
+        let server = physical_server("server-id", "server-name");
+
+        assert_eq!(stable_server_id(&server), "server-id");
+    }
+
+    #[test]
+    fn stable_server_id_falls_back_to_name() {
+        let server = physical_server("", "server-name");
+
+        assert_eq!(stable_server_id(&server), "server-name");
+    }
+}

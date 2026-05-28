@@ -413,3 +413,76 @@ pub(crate) fn proton_persistent_peer_ip(server: &PhysicalServer) -> Result<Strin
         .clone()
         .context("Proton topology server is missing a usable peer IP")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{PhysicalServer, ServerEntryInfo};
+    use std::collections::BTreeMap;
+
+    fn base_server() -> PhysicalServer {
+        PhysicalServer {
+            id: "server-id".into(),
+            name: "server-name".into(),
+            entry_ip: None,
+            entry_ipv6: None,
+            entry_per_protocol: BTreeMap::new(),
+            exit_ip: None,
+            domain: Some("peer.example".into()),
+            label: None,
+            status: 1,
+            load: None,
+            public_key: Some("peer-public-key".into()),
+            generation: None,
+            services_down: None,
+            services_down_reason: None,
+        }
+    }
+
+    #[test]
+    fn proton_persistent_peer_ip_prefers_wireguard_udp_ipv4() {
+        let mut server = base_server();
+        server.entry_per_protocol.insert(
+            "WireGuardUDP".into(),
+            ServerEntryInfo {
+                ipv4: Some("10.0.0.1".into()),
+                ports: vec![51820],
+            },
+        );
+        server.entry_ip = Some("10.0.0.2".into());
+        server.exit_ip = Some("10.0.0.3".into());
+        server.domain = Some("peer.example".into());
+
+        assert_eq!(proton_persistent_peer_ip(&server).unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn proton_persistent_peer_ip_falls_back_through_available_fields() {
+        let mut server = base_server();
+        server.entry_ip = Some("10.0.0.2".into());
+        assert_eq!(proton_persistent_peer_ip(&server).unwrap(), "10.0.0.2");
+
+        server.entry_ip = None;
+        server.exit_ip = Some("10.0.0.3".into());
+        assert_eq!(proton_persistent_peer_ip(&server).unwrap(), "10.0.0.3");
+
+        server.exit_ip = None;
+        server.domain = Some("peer.example".into());
+        assert_eq!(proton_persistent_peer_ip(&server).unwrap(), "peer.example");
+    }
+
+    #[test]
+    fn proton_persistent_certificate_features_carries_peer_metadata() {
+        let server = base_server();
+
+        let features = proton_persistent_certificate_features(&server).unwrap();
+
+        assert_eq!(features.bouncing, "0");
+        assert!(!features.port_forwarding);
+        assert!(features.split_tcp);
+        assert_eq!(features.peer_name, "server-name");
+        assert_eq!(features.peer_ip, "peer.example");
+        assert_eq!(features.peer_public_key, "peer-public-key");
+        assert_eq!(features.platform, "Android");
+    }
+}
