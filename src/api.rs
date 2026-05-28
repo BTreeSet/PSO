@@ -568,13 +568,16 @@ impl ProtonApiClient {
         uid: &str,
         refresh_token: &str,
     ) -> Result<AuthTokens> {
-        let url = self.api_url("core/v4/auth/refresh");
+        let url = self.api_url("auth/v4/refresh");
         let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
         let request = RefreshSessionBody {
+            uid: uid.to_string(),
             refresh_token: refresh_token.to_string(),
             response_type: "token".into(),
             grant_type: "refresh_token".into(),
             redirect_uri: "https://protonmail.com".into(),
+            state: session::generate_refresh_state_token(),
+            access_token: None,
         };
 
         send_json_with_retry_with_observer(

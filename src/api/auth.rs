@@ -191,14 +191,20 @@ mod tests {
         assert_eq!(login["TwoFactorCode"], "123456");
 
         let refresh = serde_json::to_value(RefreshSessionBody {
+            uid: "uid-123".into(),
             refresh_token: "refresh-token".into(),
             response_type: "token".into(),
             grant_type: "refresh_token".into(),
-            redirect_uri: "https://protonmail.com".into(),
+            redirect_uri: "https://protonmail.ch".into(),
+            state: "state-token".into(),
+            access_token: None,
         })
         .unwrap();
+        assert_eq!(refresh["UID"], "uid-123");
         assert_eq!(refresh["RefreshToken"], "refresh-token");
-        assert!(refresh.get("UID").is_none());
+        assert_eq!(refresh["RedirectURI"], "https://protonmail.ch");
+        assert_eq!(refresh["State"], "state-token");
+        assert!(refresh.get("AccessToken").is_none());
 
         let fork = serde_json::to_value(SessionForkBody {
             payload: "payload".into(),
