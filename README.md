@@ -257,4 +257,6 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
+The workspace carries `.cargo/config.toml` for the internal `proton_public` registry because PSO now depends on Proton's internal `proton-srp` crate. Build hosts need access to `https://rust-registry.proton.me/index/` for dependency resolution.
+
 Dependency review notes are in `docs/dependencies.md`. Planned work is tracked in `docs/roadmap.md`.

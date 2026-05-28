@@ -8,20 +8,18 @@ The current direct runtime dependency graph was captured with `cargo tree -e nor
 
 - `anyhow 1.0.102`: error context for CLI/control-plane flows.
 - `base64 0.22.1`: WireGuard key and Proton payload encoding.
-- `bcrypt 0.19.1`: Proton SRP password expansion step.
 - `clap 4.6.1`: CLI parser with env-var support.
-- `hex 0.4.3`: SRP hexadecimal parameter encoding/decoding.
+- `hex 0.4.3`: hexadecimal encoding for render fingerprints and opaque username state keys.
 - `libc 0.2.186`: POSIX `SIGHUP` signaling.
-- `num-bigint 0.4.6`, `num-traits 0.2.19`: SRP big integer arithmetic.
 - `parking_lot 0.12.5`: in-memory session store locking.
-- `pgp 0.19.0`: OpenPGP cleartext-signature verification for Proton's signed SRP modulus, with default features disabled to avoid unused compression support.
+- `proton-srp 0.8.2` from `proton_public`: maintained internal Proton SRP client implementation, including signed-modulus verification through its transitive OpenPGP stack.
 - `rand_core 0.6.4`: RNG trait version required by `x25519-dalek`.
 - `reqwest 0.13.3`: Proton HTTP client, with only `json`, `query`, and `rustls` features enabled.
 - `rpassword 7.5.3`: hidden password/TOTP prompt for rare interactive CLI runs.
 - `rusqlite 0.39.0`: SQLite state database for Proton auth sessions, runtime events, and health history, with bundled SQLite for predictable Alpine/container builds.
 - `serde 1.0.228`, `serde_json 1.0.150`: API/config serialization.
 - `sha1 0.11.0`: RFC 6238 TOTP code derivation from long-term 2FA secrets.
-- `sha2 0.11.0`: SRP hashing.
+- `sha2 0.11.0`: hashing for render/state digests and Proton helper code outside the SRP crate.
 - `sysinfo 0.39.2`: sing-box process discovery.
 - `tempfile 3.27.0`: atomic config write support.
 - `tokio 1.52.3`: async runtime, timers, process, signal, and supervisor channel/mutex support.
@@ -36,17 +34,19 @@ The current direct runtime dependency graph was captured with `cargo tree -e nor
 
 ## Duplicate Versions
 
-`cargo tree -d` currently reports duplicate `getrandom` major versions:
+`cargo tree -d` now reports several duplicate crypto support crates after adopting `proton-srp`:
 
-- `getrandom 0.2.17` arrives through `rand_core 0.6.4` and `x25519-dalek`.
-- `getrandom 0.4.2` arrives through `bcrypt 0.19.1` and `tempfile 3.27.0`.
+- `block-buffer`/`digest`/`cpufeatures` are split between PSO's direct `sha1`/`sha2` 0.11 stack and `proton-srp -> pgp`'s `sha1`/`sha2` 0.10 stack.
+- `getrandom 0.2.17` arrives through `rand_core 0.6.4` and `proton-srp`; `getrandom 0.3.4` arrives through `proton-srp -> bcrypt 0.17.1`; `getrandom 0.4.2` still arrives through `tempfile 3.27.0`.
+- `const-oid` and `crypto-common` also duplicate for the same reason.
 
-This is an accepted temporary cost of using current `bcrypt`/`tempfile` while keeping X25519 key generation on the stable Dalek API. Revisit when X25519 moves to a newer `rand_core`.
+This is an accepted temporary cost of reusing Proton's maintained SRP implementation instead of carrying custom SRP math locally. Revisit when the internal SRP stack converges on newer crypto support crates or when PSO can consolidate its direct digest requirements.
 
 ## Supply Chain Posture
 
 - `Cargo.lock` is committed and Docker builds use `cargo build --release --locked`.
-- `pgp` is built with `default-features = false`; PSO uses it only for Proton modulus signature verification and does not need optional bzip2 armor support.
+- The workspace `.cargo/config.toml` registers the internal `proton_public` sparse index so builds can resolve `proton-srp`; CI and release builders must have access to `https://rust-registry.proton.me/index/`.
+- `proton-srp` now owns Proton SRP modulus verification; PSO no longer carries a parallel in-tree implementation of the SRP math and signed-modulus parsing.
 - `reqwest` is built with `default-features = false` and only the features PSO uses: `json`, `query`, `rustls`.
 - Native OpenSSL is avoided in the PSO binary; the Alpine runtime installs only `bash`, `tzdata`, `ca-certificates`, and `nftables` plus bundled `sing-box`.
 - Desktop keyring integration was removed. Headless deployments use `pso.sqlite3` plus explicit files under the PSO state directory, typically backed by a mounted Docker volume.

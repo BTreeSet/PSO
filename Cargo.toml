@@ -8,14 +8,11 @@ description = "Proton-Singbox Orchestrator multi-tenant control plane"
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
-bcrypt = "0.19"
 clap = { version = "4.5", features = ["derive", "env"] }
 hex = "0.4"
 libc = "0.2"
-num-bigint = "0.4"
-num-traits = "0.2"
 parking_lot = "0.12"
-pgp = { version = "0.19", default-features = false }
+proton-srp = { version = "0.8.2", registry = "proton_public" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 rpassword = "7.5"
