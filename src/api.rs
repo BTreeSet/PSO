@@ -582,11 +582,7 @@ impl ProtonApiClient {
 
         send_json_with_retry_with_observer(
             || {
-                let builder = self
-                    .client
-                    .post(&url)
-                    .header("x-pm-uid", uid)
-                    .json(&request);
+                let builder = self.client.post(&url).json(&request);
                 self.with_username_cookie_header(builder, Some(username), &request_url)
             },
             self.debug_http,

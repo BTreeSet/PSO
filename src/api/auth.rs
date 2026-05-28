@@ -202,6 +202,8 @@ mod tests {
         .unwrap();
         assert_eq!(refresh["UID"], "uid-123");
         assert_eq!(refresh["RefreshToken"], "refresh-token");
+        assert_eq!(refresh["ResponseType"], "token");
+        assert_eq!(refresh["GrantType"], "refresh_token");
         assert_eq!(refresh["RedirectURI"], "https://protonmail.ch");
         assert_eq!(refresh["State"], "state-token");
         assert!(refresh.get("AccessToken").is_none());

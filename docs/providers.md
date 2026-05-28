@@ -120,6 +120,8 @@ Proton endpoints remain dynamic and use the Proton-specific filter model:
 
 PSO's Proton dynamic API path mirrors the browser capture more closely than the older session-only flow: `core/v4/auth/info` uses `Intent: Auto`, `vpn/v1/certificate` uses persistent-mode request bodies, `vpn/v1/certificate/all?Mode=persistent&Offset=0&Limit=51` is available for inspection, and the optional `run.session_keepalive_interval_secs` loop polls `auth/v4/sessions` with authenticated access tokens. Certificate state persists a profile identifier so expiry extension can target known profiles efficiently, preferring client public key matches and falling back to assigned IP plus endpoint correlation.
 
+For the capture-derived request shapes and header details, see [proton-api-shapes.md](proton-api-shapes.md).
+
 Proton can also require human verification during login. When that happens, PSO opens the `verify.proton.me` challenge URL, prompts for the resolved verification token in interactive terminals, and accepts the same token through `--human-verification-token` or `PSO_PROTON_HUMAN_VERIFICATION_TOKEN` for headless runs.
 
 If you need to copy the token manually, open the browser DevTools console before solving the challenge and enter `postMessage = console.log`. When the CAPTCHA succeeds, the browser prints a message shaped like `{"type":"HUMAN_VERIFICATION_SUCCESS","payload":{"token":"...","type":"captcha"}}`. Use the `payload.token` value as the resolved verification token.
