@@ -568,7 +568,7 @@ impl ProtonApiClient {
         uid: &str,
         refresh_token: &str,
     ) -> Result<AuthTokens> {
-        let url = self.api_url("auth/refresh");
+        let url = self.api_url("core/v4/auth/refresh");
         let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
         let request = RefreshSessionBody {
             refresh_token: refresh_token.to_string(),
