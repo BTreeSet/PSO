@@ -3,6 +3,7 @@
 FROM --platform=$TARGETPLATFORM rust:1.95-alpine AS builder
 WORKDIR /src
 RUN apk add --no-cache musl-dev
+COPY .cargo ./.cargo
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
