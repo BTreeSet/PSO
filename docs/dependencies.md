@@ -14,9 +14,9 @@ The current direct runtime dependency graph was captured with `cargo tree -e nor
 - `parking_lot 0.12.5`: in-memory session store locking.
 - `proton-srp 0.8.2` from `proton_public`: maintained internal Proton SRP client implementation, including signed-modulus verification through its transitive OpenPGP stack.
 - `rand_core 0.6.4`: RNG trait version required by `x25519-dalek`.
-- `reqwest 0.13.3`: Proton HTTP client, with only `json`, `query`, and `rustls` features enabled.
+- `reqwest 0.13.4`: Proton HTTP client, with only `json`, `query`, and `rustls` features enabled.
 - `rpassword 7.5.3`: hidden password/TOTP prompt for rare interactive CLI runs.
-- `rusqlite 0.39.0`: SQLite state database for Proton auth sessions, runtime events, and health history, with bundled SQLite for predictable Alpine/container builds.
+- `rusqlite 0.40.0`: SQLite state database for Proton auth sessions, runtime events, and health history, with bundled SQLite for predictable Alpine/container builds.
 - `serde 1.0.228`, `serde_json 1.0.150`: API/config serialization.
 - `sha1 0.11.0`: RFC 6238 TOTP code derivation from long-term 2FA secrets.
 - `sha2 0.11.0`: hashing for render/state digests and Proton helper code outside the SRP crate.

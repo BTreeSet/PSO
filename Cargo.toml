@@ -16,7 +16,7 @@ proton-srp = { version = "0.8.2", registry = "proton_public" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 rpassword = "7.5"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 httpdate = "1"
