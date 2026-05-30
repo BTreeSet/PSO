@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$TARGETPLATFORM rust:1.95-alpine AS builder
+FROM --platform=$TARGETPLATFORM rust:1.96-alpine AS builder
 WORKDIR /src
 RUN apk add --no-cache musl-dev
 COPY .cargo ./.cargo
