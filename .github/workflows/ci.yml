@@ -225,6 +225,6 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/pso" "dist/${{ matrix.binary_name }}"
           tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.binary_name }}"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/${{ matrix.archive_name }}
