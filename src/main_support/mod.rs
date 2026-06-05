@@ -234,20 +234,20 @@ fn write_logicals_from_available_state(
     let source = match fallback_topology {
         Some(path) if path.exists() => {
             eprintln!(
-                "warning: /vpn/v2/logicals fetch failed, using fallback topology from {}: {error:#}",
+                "warning: /vpn/v1/logicals fetch failed, using fallback topology from {}: {error:#}",
                 path.display()
             );
             path
         }
         _ if state_logicals.exists() => {
             eprintln!(
-                "warning: /vpn/v2/logicals fetch failed, using topology state from {}: {error:#}",
+                "warning: /vpn/v1/logicals fetch failed, using topology state from {}: {error:#}",
                 state_logicals.display()
             );
             state_logicals
         }
         Some(path) => anyhow::bail!(
-            "/vpn/v2/logicals fetch failed and fallback topology {} does not exist: {error:#}",
+            "/vpn/v1/logicals fetch failed and fallback topology {} does not exist: {error:#}",
             path.display()
         ),
         None => return Err(error),

@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 
+use crate::model::PhysicalServer;
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CertificateRequest {
@@ -12,7 +14,7 @@ pub struct CertificateRequest {
     #[serde(rename = "Mode")]
     pub mode: String,
     #[serde(rename = "Features")]
-    pub features: CertificateFeatures,
+    pub features: PersistentCertificateFeatures,
     #[serde(
         rename = "ClientPublicKeyMode",
         skip_serializing_if = "Option::is_none"
@@ -25,21 +27,6 @@ pub struct CertificateRequest {
 }
 
 impl CertificateRequest {
-    pub fn wireguard_session(
-        client_public_key: impl Into<String>,
-        device_name: impl Into<String>,
-    ) -> Self {
-        Self {
-            client_public_key: client_public_key.into(),
-            device_name: device_name.into(),
-            mode: "session".into(),
-            features: CertificateFeatures::Empty(Vec::new()),
-            client_public_key_mode: Some("EC".into()),
-            duration: None,
-            renew: None,
-        }
-    }
-
     pub fn persistent_wireguard(
         client_public_key: impl Into<String>,
         device_name: impl Into<String>,
@@ -57,19 +44,12 @@ impl CertificateRequest {
             client_public_key,
             device_name: device_name.into(),
             mode: "persistent".into(),
-            features: CertificateFeatures::Persistent(features),
+            features,
             client_public_key_mode: None,
             duration: None,
             renew: renew.then_some(true),
         })
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum CertificateFeatures {
-    Empty(Vec<String>),
-    Persistent(PersistentCertificateFeatures),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,19 +86,45 @@ impl PersistentCertificateFeatures {
             platform: "Android".into(),
         }
     }
+
+    /// Build the `Features` block from a Proton physical server entry,
+    /// matching the exact wire shape captured from the web client.
+    pub fn for_proton_server(server: &PhysicalServer) -> Result<Self> {
+        let peer_public_key = server
+            .public_key
+            .as_deref()
+            .context("Proton topology server is missing peer public key")?;
+        Ok(Self::proton(
+            server.name.clone(),
+            proton_persistent_peer_ip(server)?,
+            peer_public_key,
+        ))
+    }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
-pub struct SessionLocalKeyBody {
-    pub key: String,
-}
+/// Resolve the peer IP that should be sent in a persistent certificate
+/// `Features` block for a given Proton physical server.
+pub fn proton_persistent_peer_ip(server: &PhysicalServer) -> Result<String> {
+    if let Some(peer_ip) = server
+        .entry_per_protocol
+        .get("WireGuardUDP")
+        .and_then(|entry| entry.ipv4.clone())
+    {
+        return Ok(peer_ip);
+    }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
-pub struct SessionPayloadBody {
-    pub payload: serde_json::Value,
-    pub persistent_cookies: u8,
+    if let Some(peer_ip) = server.entry_ip.clone() {
+        return Ok(peer_ip);
+    }
+
+    if let Some(peer_ip) = server.exit_ip.clone() {
+        return Ok(peer_ip);
+    }
+
+    server
+        .domain
+        .clone()
+        .context("Proton topology server is missing a usable peer IP")
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -283,22 +289,31 @@ fn extract_raw_x25519_public_key_base64(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     use super::*;
+    use crate::model::{PhysicalServer, ServerEntryInfo};
 
     const DUMMY_X25519_PUBLIC_KEY_BASE64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     const DUMMY_PEER_PUBLIC_KEY: &str = "dumb-peer-public-key";
 
-    #[test]
-    fn serializes_certificate_request_like_proton_client() {
-        let request = CertificateRequest::wireguard_session("public-key", "PSO-Rust-Control-Plane");
-        let value = serde_json::to_value(request).unwrap();
-        assert_eq!(value["ClientPublicKey"], "public-key");
-        assert_eq!(value["ClientPublicKeyMode"], "EC");
-        assert_eq!(value["DeviceName"], "PSO-Rust-Control-Plane");
-        assert_eq!(value["Mode"], "session");
-        assert_eq!(value["Features"], json!([]));
-        assert!(value.get("Renew").is_none());
+    fn base_server() -> PhysicalServer {
+        PhysicalServer {
+            id: "server-id".into(),
+            name: "server-name".into(),
+            entry_ip: None,
+            entry_ipv6: None,
+            entry_per_protocol: BTreeMap::new(),
+            exit_ip: None,
+            domain: Some("peer.example".into()),
+            label: None,
+            status: 1,
+            load: None,
+            public_key: Some("peer-public-key".into()),
+            generation: None,
+            services_down: None,
+            services_down_reason: None,
+        }
     }
 
     #[test]
@@ -322,32 +337,14 @@ mod tests {
             value["ClientPublicKey"],
             pem_encode_x25519_public_key(DUMMY_X25519_PUBLIC_KEY_BASE64).unwrap()
         );
+        assert!(
+            value.get("ClientPublicKeyMode").is_none(),
+            "browser shape never sets ClientPublicKeyMode"
+        );
         assert_eq!(value["Features"]["Bouncing"], "0");
         assert_eq!(value["Features"]["peerName"], "DUMMY-FREE#1");
         assert_eq!(value["Features"]["peerIp"], "198.51.100.10");
         assert_eq!(value["Features"]["platform"], "Android");
-    }
-
-    #[test]
-    fn serializes_browser_session_maintenance_bodies_like_proton_client() {
-        let local_key = serde_json::to_value(SessionLocalKeyBody {
-            key: "dumb-session-key".into(),
-        })
-        .unwrap();
-        assert_eq!(local_key["Key"], "dumb-session-key");
-
-        let payload = serde_json::to_value(SessionPayloadBody {
-            payload: json!({
-                ".-77VX-aP0iPqoI": "dumb-encrypted-payload"
-            }),
-            persistent_cookies: 1,
-        })
-        .unwrap();
-        assert_eq!(
-            payload["Payload"][".-77VX-aP0iPqoI"],
-            "dumb-encrypted-payload"
-        );
-        assert_eq!(payload["PersistentCookies"], 1);
     }
 
     #[test]
@@ -408,5 +405,51 @@ mod tests {
         assert_eq!(response.expiration_time_ms().unwrap(), 2000);
         assert_eq!(response.refresh_time_ms().unwrap(), 1000);
         assert_eq!(response.assigned_ip.as_deref(), Some("10.2.0.2/32"));
+    }
+
+    #[test]
+    fn proton_persistent_peer_ip_prefers_wireguard_udp_ipv4() {
+        let mut server = base_server();
+        server.entry_per_protocol.insert(
+            "WireGuardUDP".into(),
+            ServerEntryInfo {
+                ipv4: Some("10.0.0.1".into()),
+                ports: vec![51820],
+            },
+        );
+        server.entry_ip = Some("10.0.0.2".into());
+        server.exit_ip = Some("10.0.0.3".into());
+        server.domain = Some("peer.example".into());
+
+        assert_eq!(proton_persistent_peer_ip(&server).unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn proton_persistent_peer_ip_falls_back_through_available_fields() {
+        let mut server = base_server();
+        server.entry_ip = Some("10.0.0.2".into());
+        assert_eq!(proton_persistent_peer_ip(&server).unwrap(), "10.0.0.2");
+
+        server.entry_ip = None;
+        server.exit_ip = Some("10.0.0.3".into());
+        assert_eq!(proton_persistent_peer_ip(&server).unwrap(), "10.0.0.3");
+
+        server.exit_ip = None;
+        server.domain = Some("peer.example".into());
+        assert_eq!(proton_persistent_peer_ip(&server).unwrap(), "peer.example");
+    }
+
+    #[test]
+    fn features_for_proton_server_carries_peer_metadata() {
+        let server = base_server();
+        let features = PersistentCertificateFeatures::for_proton_server(&server).unwrap();
+
+        assert_eq!(features.bouncing, "0");
+        assert!(!features.port_forwarding);
+        assert!(features.split_tcp);
+        assert_eq!(features.peer_name, "server-name");
+        assert_eq!(features.peer_ip, "peer.example");
+        assert_eq!(features.peer_public_key, "peer-public-key");
+        assert_eq!(features.platform, "Android");
     }
 }

@@ -24,11 +24,11 @@ pub use auth::{
     LoginIntent, LoginTwoFactorBody, PreAuthSession, TwoFactorState,
 };
 pub use certificate::{
-    CertificateFeatures, CertificateListResponse, CertificateRequest, CertificateResponse,
-    PersistentCertificateFeatures, SessionLocalKeyBody, SessionPayloadBody,
+    CertificateListResponse, CertificateRequest, CertificateResponse,
+    PersistentCertificateFeatures, proton_persistent_peer_ip,
 };
 pub use human_verification::HumanVerificationChallenge;
-pub use session::{AuthCookiesBody, RefreshSessionBody, SessionForkBody};
+pub use session::RefreshSessionBody;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtonAccessToken {
@@ -59,7 +59,6 @@ impl ProtonAccessToken {
 pub struct ProtonApiClient {
     base_url: String,
     client: Client,
-    client_id: String,
     debug_http: bool,
     state_dir: Option<PathBuf>,
 }
@@ -128,7 +127,6 @@ impl ProtonApiClient {
         Ok(Self {
             base_url: normalize_api_base_url(base_url.into()),
             client,
-            client_id: profile.client_id.clone(),
             debug_http,
             state_dir,
         })
@@ -289,57 +287,6 @@ impl ProtonApiClient {
         .context("Proton sessions listing request failed")
     }
 
-    pub async fn set_session_local_key(
-        &self,
-        access: &ProtonAccessToken,
-        key: impl Into<String>,
-    ) -> Result<ApiCodeResponse> {
-        let url = self.api_url("auth/v4/sessions/local/key");
-        let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
-        let access_uid = access.uid.as_deref();
-        let request = SessionLocalKeyBody { key: key.into() };
-        send_json_with_retry_with_observer(
-            || {
-                with_browser_origin_headers(
-                    self.with_access_token_auth(self.client.put(&url), access, &request_url),
-                    BROWSER_LOGIN_REFERER,
-                )
-                .json(&request)
-            },
-            self.debug_http,
-            |response| self.store_response_cookies_for_uid(access_uid, response),
-        )
-        .await
-        .context("Proton session local key request failed")
-    }
-
-    pub async fn set_session_payload(
-        &self,
-        access: &ProtonAccessToken,
-        payload: serde_json::Value,
-    ) -> Result<ApiCodeResponse> {
-        let url = self.api_url("auth/v4/sessions/payload");
-        let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
-        let access_uid = access.uid.as_deref();
-        let request = SessionPayloadBody {
-            payload,
-            persistent_cookies: 1,
-        };
-        send_json_with_retry_with_observer(
-            || {
-                with_browser_origin_headers(
-                    self.with_access_token_auth(self.client.post(&url), access, &request_url),
-                    BROWSER_LOGIN_REFERER,
-                )
-                .json(&request)
-            },
-            self.debug_http,
-            |response| self.store_response_cookies_for_uid(access_uid, response),
-        )
-        .await
-        .context("Proton session payload request failed")
-    }
-
     pub async fn list_persistent_certificates(
         &self,
         access: &ProtonAccessToken,
@@ -375,7 +322,7 @@ impl ProtonApiClient {
         country: Option<&str>,
         netzone: Option<&str>,
     ) -> Result<Vec<LogicalServer>> {
-        let url = self.api_url("vpn/v2/logicals");
+        let url = self.api_url("vpn/v1/logicals");
         let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
         let access_uid = access.uid.as_deref();
         Ok(
@@ -386,6 +333,7 @@ impl ProtonApiClient {
                         .query(&[
                             ("WithEntriesForProtocols", PROTON_LOGICALS_PROTOCOLS),
                             ("WithState", "true"),
+                            ("WithIpV6", "1"),
                         ]);
                     builder = builder.header("x-pm-response-truncation-permitted", "true");
                     if let Some(country) = country {
@@ -475,12 +423,12 @@ impl ProtonApiClient {
         let url = self.api_url("core/v4/auth");
         let request = LoginBody {
             username: username.to_string(),
-            persistent_cookies: 1,
             client_ephemeral: srp.client_ephemeral.clone(),
             client_proof: srp.client_proof.clone(),
             srp_session: srp_session.to_string(),
             payload: None,
             two_factor_code: two_factor_code.map(ToOwned::to_owned),
+            persistent_cookies: 1,
         };
         let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
         let human_verification_headers = human_verification_token
@@ -543,86 +491,30 @@ impl ProtonApiClient {
         Ok(())
     }
 
-    pub async fn fork_vpn_session(
-        &self,
-        primary_access: &ProtonAccessToken,
-        payload: Option<String>,
-    ) -> Result<AuthTokens> {
-        let url = self.api_url("auth/v4/sessions/forks");
-        let request = SessionForkBody {
-            payload: payload.unwrap_or_default(),
-            child_client_id: self.client_id.clone(),
-            independent: 1,
-            user_code: None,
-        };
-        let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
-        let access_uid = primary_access.uid.as_deref();
-
-        send_json_with_retry_with_observer(
-            || {
-                self.with_access_token_auth(self.client.post(&url), primary_access, &request_url)
-                    .json(&request)
-            },
-            self.debug_http,
-            |response| self.store_response_cookies_for_uid(access_uid, response),
-        )
-        .await
-        .context("Proton session fork request failed")
-    }
-
     pub async fn refresh_session(
         &self,
         username: &str,
         uid: &str,
         refresh_token: &str,
     ) -> Result<AuthTokens> {
-        let url = self.api_url("auth/v4/refresh");
+        let url = self.api_url("core/v4/auth/cookies");
         let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
-        let request = RefreshSessionBody {
-            uid: uid.to_string(),
-            refresh_token: refresh_token.to_string(),
-            response_type: "token".into(),
-            grant_type: "refresh_token".into(),
-            redirect_uri: "https://protonmail.com".into(),
-            state: session::generate_refresh_state_token(),
-            access_token: None,
-        };
+        let request = RefreshSessionBody::browser(uid, refresh_token);
 
         send_json_with_retry_with_observer(
             || {
-                let builder = self.client.post(&url).json(&request);
+                let builder = with_browser_origin_headers(
+                    self.client.post(&url).header("x-pm-uid", uid),
+                    BROWSER_LOGIN_REFERER,
+                )
+                .json(&request);
                 self.with_username_cookie_header(builder, Some(username), &request_url)
             },
             self.debug_http,
             |response| self.store_response_cookies_for_username(username, response),
         )
         .await
-        .context("Proton auth refresh request failed")
-    }
-
-    pub async fn auth_cookies(
-        &self,
-        uid: &str,
-        access_token: &str,
-        request: &AuthCookiesBody,
-    ) -> Result<ApiCodeResponse> {
-        let url = self.api_url("core/v4/auth/cookies");
-        let request_url = reqwest::Url::parse(&url).context("invalid Proton API url")?;
-        let cookie_username = self.username_for_uid(Some(uid));
-        send_json_with_retry_with_observer(
-            || {
-                let builder = with_browser_origin_headers(
-                    self.with_auth_headers(self.client.post(&url), uid, access_token),
-                    BROWSER_LOGIN_REFERER,
-                )
-                .json(request);
-                self.with_username_cookie_header(builder, cookie_username.as_deref(), &request_url)
-            },
-            self.debug_http,
-            |response| self.store_response_cookies_for_uid(Some(uid), response),
-        )
-        .await
-        .context("Proton auth cookies request failed")
+        .context("Proton auth cookies refresh request failed")
     }
 
     fn api_url(&self, path: &str) -> String {

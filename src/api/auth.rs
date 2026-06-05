@@ -47,7 +47,6 @@ pub struct LoginInfoResponse {
 #[serde(rename_all = "PascalCase")]
 pub struct LoginBody {
     pub username: String,
-    pub persistent_cookies: u8,
     pub client_ephemeral: String,
     pub client_proof: String,
     #[serde(rename = "SRPSession")]
@@ -56,6 +55,7 @@ pub struct LoginBody {
     pub payload: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub two_factor_code: Option<String>,
+    pub persistent_cookies: u8,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -153,7 +153,7 @@ pub struct ApiCodeResponse {
 mod tests {
     use serde_json::json;
 
-    use super::super::session::{RefreshSessionBody, SessionForkBody};
+    use super::super::session::RefreshSessionBody;
     use super::*;
 
     #[test]
@@ -175,7 +175,6 @@ mod tests {
 
         let login = serde_json::to_value(LoginBody {
             username: "alice@example.com".into(),
-            persistent_cookies: 1,
             client_ephemeral: "client-ephemeral".into(),
             client_proof: "client-proof".into(),
             srp_session: "srp-session".into(),
@@ -183,6 +182,7 @@ mod tests {
                 "opaque": "browser-payload"
             })),
             two_factor_code: Some("123456".into()),
+            persistent_cookies: 1,
         })
         .unwrap();
         assert_eq!(login["PersistentCookies"], 1);
@@ -190,35 +190,14 @@ mod tests {
         assert_eq!(login["Payload"]["opaque"], "browser-payload");
         assert_eq!(login["TwoFactorCode"], "123456");
 
-        let refresh = serde_json::to_value(RefreshSessionBody {
-            uid: "uid-123".into(),
-            refresh_token: "refresh-token".into(),
-            response_type: "token".into(),
-            grant_type: "refresh_token".into(),
-            redirect_uri: "https://protonmail.ch".into(),
-            state: "state-token".into(),
-            access_token: None,
-        })
-        .unwrap();
+        let refresh =
+            serde_json::to_value(RefreshSessionBody::browser("uid-123", "refresh-token")).unwrap();
         assert_eq!(refresh["UID"], "uid-123");
         assert_eq!(refresh["RefreshToken"], "refresh-token");
         assert_eq!(refresh["ResponseType"], "token");
         assert_eq!(refresh["GrantType"], "refresh_token");
-        assert_eq!(refresh["RedirectURI"], "https://protonmail.ch");
-        assert_eq!(refresh["State"], "state-token");
-        assert!(refresh.get("AccessToken").is_none());
-
-        let fork = serde_json::to_value(SessionForkBody {
-            payload: "payload".into(),
-            child_client_id: "web-vpn-settings".into(),
-            independent: 1,
-            user_code: Some("code".into()),
-        })
-        .unwrap();
-        assert_eq!(fork["ChildClientID"], "web-vpn-settings");
-        assert_eq!(fork["Payload"], "payload");
-        assert_eq!(fork["Independent"], 1);
-        assert_eq!(fork["UserCode"], "code");
+        assert_eq!(refresh["RedirectURI"], "https://protonmail.com");
+        assert_eq!(refresh["Persistent"], 0);
     }
 
     #[test]

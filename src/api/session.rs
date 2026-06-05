@@ -2,37 +2,13 @@ use base64::{Engine as _, engine::general_purpose};
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
-pub struct SessionForkBody {
-    #[serde(rename = "Payload")]
-    pub payload: String,
-    #[serde(rename = "ChildClientID")]
-    pub child_client_id: String,
-    #[serde(rename = "Independent")]
-    pub independent: u8,
-    #[serde(rename = "UserCode", skip_serializing_if = "Option::is_none")]
-    pub user_code: Option<String>,
-}
-
+/// Body sent by Proton's web client to `POST /api/core/v4/auth/cookies` to
+/// exchange a refresh token for a fresh access token plus the cookie-backed
+/// session that the browser maintains. Field order, casing, and the
+/// `Persistent: 0` marker mirror the captured request exactly.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RefreshSessionBody {
-    #[serde(rename = "UID")]
-    pub uid: String,
-    pub refresh_token: String,
-    pub response_type: String,
-    pub grant_type: String,
-    #[serde(rename = "RedirectURI")]
-    pub redirect_uri: String,
-    pub state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub access_token: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
-pub struct AuthCookiesBody {
     #[serde(rename = "UID")]
     pub uid: String,
     pub response_type: String,
@@ -44,8 +20,23 @@ pub struct AuthCookiesBody {
     pub state: String,
 }
 
+impl RefreshSessionBody {
+    /// Build a refresh request shaped exactly like the proton-web client.
+    pub fn browser(uid: &str, refresh_token: &str) -> Self {
+        Self {
+            uid: uid.to_string(),
+            response_type: "token".into(),
+            grant_type: "refresh_token".into(),
+            refresh_token: refresh_token.to_string(),
+            redirect_uri: "https://protonmail.com".into(),
+            persistent: 0,
+            state: generate_refresh_state_token(),
+        }
+    }
+}
+
 pub(super) fn generate_refresh_state_token() -> String {
-    let mut bytes = [0_u8; 32];
+    let mut bytes = [0_u8; 24];
     OsRng.fill_bytes(&mut bytes);
     general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -55,72 +46,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serializes_session_fork_and_refresh_bodies_like_proton_client() {
-        let refresh = serde_json::to_value(RefreshSessionBody {
-            uid: "uid-123".into(),
-            refresh_token: "refresh-token".into(),
-            response_type: "token".into(),
-            grant_type: "refresh_token".into(),
-            redirect_uri: "https://protonmail.ch".into(),
-            state: "state-token".into(),
-            access_token: None,
-        })
-        .unwrap();
-        assert_eq!(refresh["UID"], "uid-123");
-        assert_eq!(refresh["RefreshToken"], "refresh-token");
-        assert_eq!(refresh["ResponseType"], "token");
-        assert_eq!(refresh["GrantType"], "refresh_token");
-        assert_eq!(refresh["RedirectURI"], "https://protonmail.ch");
-        assert_eq!(refresh["State"], "state-token");
-        assert!(refresh.get("AccessToken").is_none());
+    fn refresh_body_matches_browser_capture_shape() {
+        let body =
+            serde_json::to_value(RefreshSessionBody::browser("uid-123", "refresh-token")).unwrap();
 
-        let fork = serde_json::to_value(SessionForkBody {
-            payload: "payload".into(),
-            child_client_id: "web-vpn-settings".into(),
-            independent: 1,
-            user_code: Some("code".into()),
-        })
-        .unwrap();
-        assert_eq!(fork["ChildClientID"], "web-vpn-settings");
-        assert_eq!(fork["Payload"], "payload");
-        assert_eq!(fork["Independent"], 1);
-        assert_eq!(fork["UserCode"], "code");
+        assert_eq!(body["UID"], "uid-123");
+        assert_eq!(body["ResponseType"], "token");
+        assert_eq!(body["GrantType"], "refresh_token");
+        assert_eq!(body["RefreshToken"], "refresh-token");
+        assert_eq!(body["RedirectURI"], "https://protonmail.com");
+        assert_eq!(body["Persistent"], 0);
+        assert!(body["State"].as_str().unwrap().len() >= 24);
     }
 
     #[test]
-    fn serializes_browser_auth_cookies_body_like_proton_client() {
-        let cookies = serde_json::to_value(AuthCookiesBody {
-            uid: "uid-123".into(),
-            response_type: "token".into(),
-            grant_type: "refresh_token".into(),
-            refresh_token: "refresh-token".into(),
-            redirect_uri: "https://protonmail.com".into(),
-            persistent: 0,
-            state: "state-token".into(),
-        })
-        .unwrap();
-
-        assert_eq!(cookies["UID"], "uid-123");
-        assert_eq!(cookies["ResponseType"], "token");
-        assert_eq!(cookies["GrantType"], "refresh_token");
-        assert_eq!(cookies["RefreshToken"], "refresh-token");
-        assert_eq!(cookies["RedirectURI"], "https://protonmail.com");
-        assert_eq!(cookies["Persistent"], 0);
-        assert_eq!(cookies["State"], "state-token");
-    }
-
-    #[test]
-    fn generates_refresh_state_tokens_as_opaque_non_empty_values() {
+    fn refresh_state_tokens_are_opaque_url_safe() {
         let state = generate_refresh_state_token();
-
-        assert!(!state.is_empty());
-        assert!(state.len() >= 32);
+        assert!(state.len() >= 24);
         assert!(
             state
                 .chars()
-                .all(|character| character.is_ascii_alphanumeric()
-                    || character == '-'
-                    || character == '_')
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         );
     }
 }

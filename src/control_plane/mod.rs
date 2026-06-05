@@ -9,7 +9,9 @@ use tempfile::NamedTempFile;
 use tokio::time;
 use tracing::{error, info, warn};
 
-use crate::api::{CertificateRequest, ProtonAccessToken, ProtonApiClient};
+use crate::api::{
+    CertificateRequest, PersistentCertificateFeatures, ProtonAccessToken, ProtonApiClient,
+};
 use crate::crypto::{KeyMaterial, generate_key_material};
 use crate::current_time_ms;
 use crate::model::PhysicalServer;
@@ -54,10 +56,12 @@ impl ControlPlane {
         let mut refresh_count = 0;
 
         loop {
-            let request = CertificateRequest::wireguard_session(
+            let request = CertificateRequest::persistent_wireguard(
                 &key_material.public_key_base64,
                 &config.device_name,
-            );
+                PersistentCertificateFeatures::for_proton_server(&config.selected_server)?,
+                true,
+            )?;
             let result = self
                 .api
                 .get_certificate(&config.access_token, &request)
@@ -123,10 +127,12 @@ impl ControlPlane {
         config: &ControlPlaneConfig,
     ) -> Result<CertificateRefreshOutcome> {
         let key_material = generate_key_material();
-        let request = CertificateRequest::wireguard_session(
+        let request = CertificateRequest::persistent_wireguard(
             &key_material.public_key_base64,
             &config.device_name,
-        );
+            PersistentCertificateFeatures::for_proton_server(&config.selected_server)?,
+            true,
+        )?;
         let certificate = self
             .api
             .get_certificate(&config.access_token, &request)
